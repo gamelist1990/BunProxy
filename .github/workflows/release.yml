@@ -64,11 +64,11 @@ jobs:
           DEFINE_BUILD_VERSION='"'"${version}"'"'
           DEFINE_BUILD_TIME='"'"${build_time}"'"'
           # Linux
-          bun build --compile --target=bun-linux-x64 ./index.ts --outfile build/BunProxy-${version}-linux --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          bun build --compile --target=bun-linux-x64 ./index.ts --outfile build/BunProxy-${version}-linux --minify --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # Windows (exe extension)
-          bun build --compile --target=bun-windows-x64 ./index.ts --outfile build/BunProxy-${version}-windows.exe --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          bun build --compile --target=bun-windows-x64 ./index.ts --outfile build/BunProxy-${version}-windows.exe --minify --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # MacOS Arm
-          bun build --compile --target=bun-darwin-arm64 ./index.ts --outfile build/BunProxy-${version}-darwin-arm64 --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          bun build --compile --target=bun-darwin-arm64 ./index.ts --outfile build/BunProxy-${version}-darwin-arm64 --minify --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # Expose outputs
           echo "BINARY_LINUX=build/BunProxy-${version}-linux" >> $GITHUB_OUTPUT
           echo "BINARY_WINDOWS=build/BunProxy-${version}-windows.exe" >> $GITHUB_OUTPUT
