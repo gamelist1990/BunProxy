@@ -1,0 +1,17 @@
+{
+  "name": "bun-proxy",
+  "version": "0.1.0",
+  "description": "Simple TCP/UDP proxy that reads YAML config and proxies ports.",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun index.ts",
+    "test:tcp": "bun scripts/test-tcp-proxyv2.ts",
+    "test:udp": "bun scripts/test-udp-proxyv2.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.2"
+  }
+}

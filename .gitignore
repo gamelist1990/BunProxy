@@ -1,0 +1,70 @@
+# Node / Bun
+node_modules/
+# Bun lock file is usually committed; uncomment if you want to ignore it
+# bun.lock
+
+# TypeScript build output
+dist/
+build/
+lib/
+out/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+
+# Environment
+.env
+.env.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+.parcel-cache/
+coverage/
+
+# Misc
+*.tgz
+*.bak
+
+# Node native addons
+build/Release
+
+# Ignore node_modules for any scripts folder or sub-projects
+**/node_modules/
+
+# Ignore packages and lockfiles from other package managers
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Types
+*.d.ts
+
+# Bun specific runtime cache
+.bun/
+
+# temp
+tmp/
+temp/
+
+# Generated files
+*.js
+*.cjs
+*.mjs
+*.map
+
+
+config.yml
+# Optional: Uncomment to ignore bundler outputs
+# .next/
+# .vercel/
+# dist
