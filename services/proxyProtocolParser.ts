@@ -1,4 +1,3 @@
-// Minimal Proxy Protocol v2 parser for TCP (STREAM) and UDP (DGRAM), IPv4/IPv6
 const PROXY_V2_SIGNATURE = Buffer.from([
   0x0d,0x0a,0x0d,0x0a,0x00,0x0d,0x0a,0x51,0x55,0x49,0x54,0x0a
 ]);
@@ -73,7 +72,6 @@ export function parseProxyV2(data: Buffer): ProxyV2Header | null {
     headerLength: totalHeaderLength,
   };
 
-  // Debug log minimal parse summary
   try {
     console.log('[proxy-protocol-parser] parseProxyV2', {
       version: parsed.version,
@@ -103,7 +101,6 @@ function formatIPv6(buf: Buffer): string {
 export function parseProxyV2Chain(data: Buffer): { headers: ProxyV2Header[]; payload: Buffer } {
   const headers: ProxyV2Header[] = [];
   let offset = 0;
-  let remaining = data;
   let iteration = 0;
   const MAX_ITER = 32;
   while (offset < data.length && iteration < MAX_ITER) {
@@ -117,7 +114,6 @@ export function parseProxyV2Chain(data: Buffer): { headers: ProxyV2Header[]; pay
   }
   const payload = data.subarray(offset);
 
-  // Debugging: log chain summary if any
   if (headers.length > 0) {
     try {
       console.log('[proxy-protocol-parser] parsed chain', {
@@ -139,10 +135,13 @@ export function parseProxyV2Chain(data: Buffer): { headers: ProxyV2Header[]; pay
 
 export function getOriginalClientFromHeaders(headers: ProxyV2Header[]): { ip: string, port: number } | null {
   if (!headers || headers.length === 0) return null;
-  // Assume last header in chain is the original client
   const last = headers[headers.length - 1];
   if (last && last.sourceAddress) {
     return { ip: last.sourceAddress, port: last.sourcePort };
   }
   return null;
 }
+
+
+
+//Proxy Protocol v2 Support 

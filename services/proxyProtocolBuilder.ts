@@ -100,3 +100,6 @@ function normalizeMappedIPv4(ip: string): string {
   }
   return ip;
 }
+
+
+//Proxy Protocol v2 Support 

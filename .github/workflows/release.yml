@@ -1,0 +1,164 @@
+name: Build and Release SoftWare
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ 'main', 'master' ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "BUN_INSTALL_DIR=$HOME/.bun/bin" >> $GITHUB_ENV
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+
+      - name: Confirm bun version
+        run: bun --version
+
+      - name: Read version from version.ini
+        id: read_version
+        run: |
+          set -euo pipefail
+          version=$(grep -E '^version\s*=\s*' version.ini | cut -d'=' -f2 | tr -d '[:space:]')
+          if [ -z "$version" ]; then
+            echo "Failed to read version from version.ini" >&2
+            exit 1
+          fi
+          echo "VERSION=$version" >> $GITHUB_OUTPUT
+
+      - name: Build Bun binaries for Linux/Windows/Mac
+        id: bun_build
+        run: |
+          set -euo pipefail
+          version=${{ steps.read_version.outputs.VERSION }}
+          build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          mkdir -p build
+          # Define flags with quoted strings per the request
+          DEFINE_BUILD_VERSION='"'"${version}"'"'
+          DEFINE_BUILD_TIME='"'"${build_time}"'"'
+          # Linux
+          bun build --compile --target=bun-linux-x64 ./index.ts --outfile build/BunProxy-${version}-linux --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          # Windows (exe extension)
+          bun build --compile --target=bun-windows-x64 ./index.ts --outfile build/BunProxy-${version}-windows.exe --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          # MacOS Arm
+          bun build --compile --target=bun-darwin-arm64 ./index.ts --outfile build/BunProxy-${version}-darwin-arm64 --minify --bytecode --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          # Expose outputs
+          echo "BINARY_LINUX=build/BunProxy-${version}-linux" >> $GITHUB_OUTPUT
+          echo "BINARY_WINDOWS=build/BunProxy-${version}-windows.exe" >> $GITHUB_OUTPUT
+          echo "BINARY_MAC=build/BunProxy-${version}-darwin-arm64" >> $GITHUB_OUTPUT
+      - name: Prepare release metadata (date, tag)
+        id: release_meta
+        run: |
+          set -euo pipefail
+          date=$(date -u +%Y-%m-%d)
+          version="${{ steps.read_version.outputs.VERSION }}"
+          tag="release-${version}"
+          echo "RELEASE_DATE=$date" >> $GITHUB_OUTPUT
+          echo "RELEASE_VERSION=$version" >> $GITHUB_OUTPUT
+          echo "TAG_NAME=$tag" >> $GITHUB_OUTPUT
+          echo "RELEASE_NAME=$version" >> $GITHUB_OUTPUT
+      - name: Delete existing same-day release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const tag = '${{ steps.release_meta.outputs.TAG_NAME }}';
+            const repo = context.repo;
+            // Delete release if exists
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({ owner: repo.owner, repo: repo.repo, tag });
+              await github.rest.repos.deleteRelease({ owner: repo.owner, repo: repo.repo, release_id: existing.data.id });
+              console.log(`Deleted existing release for tag ${tag}`);
+            } catch (err) {
+              if (err.status === 404) {
+                console.log('No existing release for this tag');
+              } else {
+                throw err;
+              }
+            }
+            // Delete git tag ref if exists (so we can re-create the tag pointing to the current commit)
+            try {
+              await github.rest.git.deleteRef({ owner: repo.owner, repo: repo.repo, ref: `tags/${tag}` });
+              console.log(`Deleted git tag ref for tag ${tag}`);
+            } catch (err) {
+              if (err.status === 422 || err.status === 404) {
+                console.log('No git tag ref found to delete');
+              } else {
+                throw err;
+              }
+            }
+      - name: Determine changelog compare URL
+        id: changelog
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const repo = context.repo;
+            const releases = await github.rest.repos.listReleases(repo);
+            const newTag = '${{ steps.release_meta.outputs.TAG_NAME }}';
+            // Find the most recent release that isn't the same as the new tag
+            const previous = releases.data.find(r => !r.draft && !r.prerelease && r.tag_name !== newTag);
+            if (previous) {
+              return `https://github.com/${repo.owner}/${repo.repo}/compare/${previous.tag_name}...${newTag}`;
+            }
+            return `https://github.com/${repo.owner}/${repo.repo}/commits/${process.env.GITHUB_SHA}`;
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.release_meta.outputs.TAG_NAME }}
+          release_name: ${{ steps.release_meta.outputs.RELEASE_NAME }}
+          body: |
+            Changelog: ${{ steps.changelog.outputs.result }}
+
+            README: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md
+
+            Download once uploaded:
+            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux
+            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-windows.exe
+            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-darwin-arm64
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (linux binary)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bun_build.outputs.BINARY_LINUX }}
+          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (windows binary)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bun_build.outputs.BINARY_WINDOWS }}
+          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-windows.exe
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (macos arm64 binary)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bun_build.outputs.BINARY_MAC }}
+          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-darwin-arm64
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

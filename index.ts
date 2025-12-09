@@ -3,7 +3,7 @@ import path from 'path';
 import net from 'net';
 import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
-import { parseProxyV2, parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
+import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
 import YAML from 'yaml';
 
 
@@ -11,7 +11,7 @@ type ListenerRule = {
   bind: string;
   tcp?: number;
   udp?: number;
-  haproxy?: boolean; // enable proxy protocol v2
+  haproxy?: boolean;
   target: {
     host: string;
     tcp?: number;
@@ -59,7 +59,6 @@ function startTcpProxy(rule: ListenerRule) {
   const server = net.createServer((clientSocket: net.Socket) => {
     const clientAddr = `${clientSocket.remoteAddress}:${clientSocket.remotePort}`;
     console.log(`[TCP] Connection from ${clientAddr} -> ${rule.target.host}:${rule.target.tcp}`);
-    // pause client while we establish dest and possibly write PROXY header
     clientSocket.pause();
     let firstChunk: Buffer | null = null;
     let firstChunkHandled = false;
@@ -67,7 +66,6 @@ function startTcpProxy(rule: ListenerRule) {
     const destSocket = net.connect(rule.target.tcp!, rule.target.host, async () => {
       destConnected = true;
       try {
-        // Determine original client IP: if the incoming client has PROXY v2 headers, prefer the last header's source.
         let originalIP = clientSocket.remoteAddress || '0.0.0.0';
         let originalPort = clientSocket.remotePort || 0;
         if (firstChunk) {
@@ -129,10 +127,8 @@ function startTcpProxy(rule: ListenerRule) {
 
     clientSocket.once('data', (buf) => {
       firstChunk = buf;
-      // If destination already connected and not handled, trigger handling.
       if (destConnected && !firstChunkHandled) {
         firstChunkHandled = true;
-        // nothing else here: destSocket.connect callback handles the firstChunk sending
       }
     });
   });
@@ -174,7 +170,6 @@ function startUdpProxy(rule: ListenerRule) {
       // Create a new socket for talking to destination
       const destSocket = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
       destSocket.on('message', (response: Buffer, destInfo: dgram.RemoteInfo) => {
-        // forward back to original client
         server.send(response, rinfo.port, rinfo.address, (err: Error | null) => {
           if (err) console.error('[UDP] Error sending back to client', err.message);
         });
@@ -182,9 +177,8 @@ function startUdpProxy(rule: ListenerRule) {
       destSocket.on('error', (err: Error) => {
         console.error('[UDP] Dest socket error', err.message);
       });
-      // Bind to an ephemeral port
       destSocket.bind(() => {
-        // nothing here
+        // None
       });
 
       session = {
@@ -195,14 +189,12 @@ function startUdpProxy(rule: ListenerRule) {
       };
       sessions.set(key, session);
 
-      // Setup cleanup timer
-      const CLEANUP_MS = 60_000; // 60s inactivity
+      const CLEANUP_MS = 60_000; // 60s
       session.timer = setTimeout(() => {
         destSocket.close();
         sessions.delete(key);
       }, CLEANUP_MS);
     } else {
-      // reset timer
       if (session.timer) clearTimeout(session.timer);
       session.timer = setTimeout(() => {
         session?.destSocket.close();
@@ -210,17 +202,16 @@ function startUdpProxy(rule: ListenerRule) {
       }, 60_000);
     }
 
-    // Detect incoming proxy-protocol chain and decide what origin to report
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
-    let actualPayload = msg; // Start with full message
+    let actualPayload = msg; 
     try {
       const chain = parseProxyV2Chain(msg);
       if (chain.headers.length > 0) {
         const last = chain.headers[chain.headers.length - 1];
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
-        actualPayload = chain.payload; // Extract actual data after PROXY headers
+        actualPayload = chain.payload; 
         console.log('[UDP] Received PROXY chain', {
           rinfo: `${rinfo.address}:${rinfo.port}`,
           chainLayers: chain.headers.length,
@@ -229,12 +220,10 @@ function startUdpProxy(rule: ListenerRule) {
         });
       }
     } catch (err) {
-      // ignore parse errors
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
     }
 
-    // Prepare payload — attach PROXY v2 header for the first packet when haproxy enabled
-    // Always use actualPayload (cleaned from upstream PROXY headers) for all packets
+    
     let payload = actualPayload;
     if (rule.haproxy && !session.headerSent) {
       try {
@@ -246,9 +235,7 @@ function startUdpProxy(rule: ListenerRule) {
         console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
       }
     }
-    // Subsequent packets: send actualPayload only (without PROXY header)
 
-    // send message to destination
     session.destSocket.send(payload, rule.target.udp!, rule.target.host, (err: Error | null) => {
       if (err) console.error('[UDP] send error', err.message);
     });
@@ -266,7 +253,6 @@ function startUdpProxy(rule: ListenerRule) {
   server.bind(rule.udp, bindAddr);
 }
 
-// Entrypoint
 function main() {
   try {
     const cfg = loadConfig();
