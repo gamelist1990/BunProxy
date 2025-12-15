@@ -127,6 +127,23 @@ jobs:
               return `https://github.com/${repo.owner}/${repo.repo}/compare/${previous.tag_name}...${newTag}`;
             }
             return `https://github.com/${repo.owner}/${repo.repo}/commits/${process.env.GITHUB_SHA}`;
+
+      - name: Extract release description from commit message
+        id: extract_desc
+        run: |
+          set -euo pipefail
+          # Get the most recent commit message
+          msg=$(git log -1 --pretty=%B || true)
+          desc=""
+          # If message contains '>>', take the part after the first occurrence as description
+          if echo "$msg" | grep -q '>>'; then
+            desc=$(echo "$msg" | awk -F'>>' '{print $2}')
+            # Trim leading/trailing whitespace
+            desc=$(echo "$desc" | sed -e 's/^ *//' -e 's/ *$//')
+          fi
+          echo "RELEASE_DESC<<EOF" >> $GITHUB_OUTPUT
+          echo "$desc" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
       - name: Create GitHub Release
         id: create_release
         uses: actions/create-release@v1
@@ -134,6 +151,8 @@ jobs:
           tag_name: ${{ steps.release_meta.outputs.TAG_NAME }}
           release_name: ${{ steps.release_meta.outputs.RELEASE_NAME }}
           body: |
+            ${{ steps.extract_desc.outputs.RELEASE_DESC }}
+
             Changelog: ${{ steps.changelog.outputs.result }}
 
             README: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md

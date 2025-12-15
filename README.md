@@ -31,3 +31,14 @@ listeners:
 
 注意: リスナールールで `haproxy: true` を設定することで、HAProxy PROXY Protocol v2を有効にできます。
 有効にすると、プロキシは各TCP接続**および**クライアントセッションごとの最初のUDPパケットに対してPROXY v2ヘッダーを送信します。宛先はPROXY Protocol v2をサポートする必要があります。
+
+
+## Download
+
+ダウンロードは[リリースページ](https://github.com/gamelist1990/BunProxy/releases)にあるので、そこから最新のビルドをダウンロードしてください。
+
+
+
+## 使い方 (動画)
+
+[![Youtube](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)

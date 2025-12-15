@@ -6,12 +6,26 @@ import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.j
 import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
 import YAML from 'yaml';
 
+async function sendDiscordWebhook(webhookUrl: string, content: string): Promise<void> {
+  try {
+    if (!webhookUrl || webhookUrl.trim() === '') return;
+    await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+  } catch (err) {
+    try { console.error('[Webhook] Failed to send webhook', err instanceof Error ? err.message : String(err)); } catch (_) {}
+  }
+}
+
 
 type ListenerRule = {
   bind: string;
   tcp?: number;
   udp?: number;
   haproxy?: boolean;
+  webhook?: string;
   target: {
     host: string;
     tcp?: number;
@@ -30,6 +44,7 @@ function writeDefaultConfig() {
         tcp: 8000,
         udp: 8001,
         haproxy: false,
+        webhook: '',
         target: { host: '127.0.0.1', tcp: 9000, udp: 9001 }
       }
     ]
@@ -57,8 +72,10 @@ function startTcpProxy(rule: ListenerRule) {
   }
   const bindAddr = rule.bind || '0.0.0.0';
   const server = net.createServer((clientSocket: net.Socket) => {
+    let webhookSentForConn = false;
     const clientAddr = `${clientSocket.remoteAddress}:${clientSocket.remotePort}`;
-    console.log(`[TCP] Connection from ${clientAddr} -> ${rule.target.host}:${rule.target.tcp}`);
+    // Initial connection notice (kept brief)
+    console.log(`[TCP] ${clientAddr} => ${rule.target.host}:${rule.target.tcp}`);
     clientSocket.pause();
     let firstChunk: Buffer | null = null;
     let firstChunkHandled = false;
@@ -88,12 +105,13 @@ function startTcpProxy(rule: ListenerRule) {
           }
         }
 
+        // Log a simplified mapping using the resolved original IP/port (after parsing if available)
+        console.log(`[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+
         if (rule.haproxy) {
           const destIP = rule.target.host;
           const destPort = rule.target.tcp || 0;
           const header = generateProxyProtocolV2Header(originalIP, originalPort, destIP, destPort, false /* stream */);
-          console.log(`[TCP] Attaching PROXY v2 header for original ${originalIP}:${originalPort} -> ${destIP}:${destPort}, headerLength=${header.length}`);
-          // Write our header, then forward the initial chunk (which may contain upstream PROXY header(s)).
           destSocket.write(header, () => {
             if (firstChunk) {
               destSocket.write(firstChunk);
@@ -101,6 +119,10 @@ function startTcpProxy(rule: ListenerRule) {
             clientSocket.resume();
             clientSocket.pipe(destSocket);
             destSocket.pipe(clientSocket);
+            if (rule.webhook && !webhookSentForConn) {
+              webhookSentForConn = true;
+              void sendDiscordWebhook(rule.webhook, `[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+            }
           });
         } else {
           // No proxy header addition; if we captured a first chunk, forward it first.
@@ -108,6 +130,10 @@ function startTcpProxy(rule: ListenerRule) {
           clientSocket.resume();
           clientSocket.pipe(destSocket);
           destSocket.pipe(clientSocket);
+          if (rule.webhook && !webhookSentForConn) {
+            webhookSentForConn = true;
+            void sendDiscordWebhook(rule.webhook, `[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+          }
         }
       } catch (err) {
         console.error('[TCP] Failed to send PROXY header', err instanceof Error ? err.message : String(err));
@@ -138,7 +164,7 @@ function startTcpProxy(rule: ListenerRule) {
   });
 
   server.listen(rule.tcp, bindAddr, () => {
-    console.log(`[TCP] Listening on ${bindAddr}:${rule.tcp} -> ${rule.target.host}:${rule.target.tcp}`);
+    console.log(`[TCP] Listening on ${bindAddr}:${rule.tcp} => ${rule.target.host}:${rule.target.tcp}`);
   });
 }
 
@@ -154,10 +180,16 @@ function startUdpProxy(rule: ListenerRule) {
     clientPort: number;
     destSocket: dgram.Socket;
     headerSent?: boolean;
+    notified?: boolean;
+    logged?: boolean;
     timer?: ReturnType<typeof setTimeout>;
   };
 
   const sessions = new Map<string, Session>();
+
+  // Grouping structures: targetKey -> map of ip -> set of ports
+  const groupedClients = new Map<string, Map<string, Set<number>>>();
+  const groupTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   function sessionKey(address: string, port: number) {
     return `${address}:${port}`;
@@ -186,6 +218,8 @@ function startUdpProxy(rule: ListenerRule) {
         clientPort: rinfo.port,
         destSocket,
         headerSent: false,
+        notified: false,
+        logged: false,
       };
       sessions.set(key, session);
 
@@ -212,12 +246,8 @@ function startUdpProxy(rule: ListenerRule) {
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
         actualPayload = chain.payload; 
-        console.log('[UDP] Received PROXY chain', {
-          rinfo: `${rinfo.address}:${rinfo.port}`,
-          chainLayers: chain.headers.length,
-          original: `${originalIP}:${originalPort}`,
-          payloadLength: actualPayload.length,
-        });
+        // Simplified UDP mapping log
+        console.log(`[UDP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.udp} (payload=${actualPayload.length})`);
       }
     } catch (err) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
@@ -228,7 +258,6 @@ function startUdpProxy(rule: ListenerRule) {
     if (rule.haproxy && !session.headerSent) {
       try {
         const header = generateProxyProtocolV2Header(originalIP, originalPort, rule.target.host, rule.target.udp!, true /* dgram */);
-        console.log(`[UDP] Attaching PROXY v2 header for original ${originalIP}:${originalPort} -> ${rule.target.host}:${rule.target.udp}, headerLength=${header.length}, payloadSize=${actualPayload.length}, totalSize=${header.length + actualPayload.length}`);
         payload = Buffer.concat([header, actualPayload]); // First packet: PROXY header + payload
         session.headerSent = true;
       } catch (err) {
@@ -237,13 +266,57 @@ function startUdpProxy(rule: ListenerRule) {
     }
 
     session.destSocket.send(payload, rule.target.udp!, rule.target.host, (err: Error | null) => {
-      if (err) console.error('[UDP] send error', err.message);
+      if (err) {
+        console.error('[UDP] send error', err.message);
+        return;
+      }
+
+      // Log to console only once per session to avoid spam
+      if (!session!.logged) {
+        console.log(`[UDP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.udp}`);
+        session!.logged = true;
+      }
+
+      // If webhook configured, aggregate notifications per target and dedupe by IP
+      if (rule.webhook && !session!.notified) {
+        session!.notified = true;
+        const targetKey = `${rule.target.host}:${rule.target.udp}`;
+        let ipMap = groupedClients.get(targetKey);
+        if (!ipMap) {
+          ipMap = new Map<string, Set<number>>();
+          groupedClients.set(targetKey, ipMap);
+        }
+        const ports = ipMap.get(originalIP) || new Set<number>();
+        ports.add(originalPort);
+        ipMap.set(originalIP, ports);
+
+        // Schedule a grouped notification shortly (debounce)
+        if (!groupTimers.has(targetKey)) {
+          const t = setTimeout(() => {
+            const map = groupedClients.get(targetKey);
+            if (!map) return;
+            const parts: string[] = [];
+            for (const [ip, portsSet] of map.entries()) {
+              if (portsSet.size === 0) parts.push(ip);
+              else if (portsSet.size === 1) parts.push(`${ip}:${Array.from(portsSet)[0]}`);
+              else parts.push(`${ip}(${Array.from(portsSet).join(',')})`);
+            }
+            // Format aggregated notification as "clients => target"
+            const body = `[UDP] ${parts.join(', ')} => ${targetKey}`;
+            // Send aggregated webhook (do not duplicate this aggregated line to console)
+            void sendDiscordWebhook(rule.webhook!, body);
+            groupedClients.delete(targetKey);
+            groupTimers.delete(targetKey);
+          }, 500);
+          groupTimers.set(targetKey, t);
+        }
+      }
     });
   });
 
   server.on('listening', () => {
     const addr = server.address() as any;
-    console.log(`[UDP] Listening on ${bindAddr}:${rule.udp} -> ${rule.target.host}:${rule.target.udp}`);
+    console.log(`[UDP] Listening on ${bindAddr}:${rule.udp} => ${rule.target.host}:${rule.target.udp}`);
   });
 
   server.on('error', (err: Error) => {
