@@ -4,6 +4,11 @@ import net from 'net';
 import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
 import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
+import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
+import { ConnectionBuffer } from './services/connectionBuffer.js';
+import { PlayerIPMapper } from './services/playerIPMapper.js';
+import { startManagementAPI } from './services/managementAPI.js';
+import { sendDiscordWebhookEmbed, createPlayerJoinEmbed, createPlayerLeaveEmbed, createConnectionEmbed, createDisconnectionEmbed } from './services/discordEmbed.js';
 import YAML from 'yaml';
 
 async function sendDiscordWebhook(webhookUrl: string, content: string): Promise<void> {
@@ -34,10 +39,14 @@ type ListenerRule = {
 };
 
 const CONFIG_FILE = path.join(process.cwd(), 'config.yml');
+const playerMapper = new TimestampPlayerMapper();
+const connectionBuffer = new ConnectionBuffer();
 
 
 function writeDefaultConfig() {
   const defaultConfig = {
+    endpoint: 6000,
+    savePlayerIP: true,
     listeners: [
       {
         bind: '0.0.0.0',
@@ -53,7 +62,7 @@ function writeDefaultConfig() {
   console.log('Created default config.yml');
 }
 
-function loadConfig(): { listeners: ListenerRule[] } {
+function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
   if (!fs.existsSync(CONFIG_FILE)) {
     writeDefaultConfig();
   }
@@ -62,11 +71,11 @@ function loadConfig(): { listeners: ListenerRule[] } {
   if (!cfg.listeners || !Array.isArray(cfg.listeners)) {
     throw new Error('config.yml must include a listeners array');
   }
-  return cfg as { listeners: ListenerRule[] };
+  return cfg as { endpoint?: number; listeners: ListenerRule[] };
 }
 
 // TCP proxy
-function startTcpProxy(rule: ListenerRule) {
+function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
   if (!rule.tcp || !rule.target.tcp) {
     return;
   }
@@ -74,30 +83,37 @@ function startTcpProxy(rule: ListenerRule) {
   const server = net.createServer((clientSocket: net.Socket) => {
     let webhookSentForConn = false;
     const clientAddr = `${clientSocket.remoteAddress}:${clientSocket.remotePort}`;
+    const connectionTime = Date.now();
+    
+    const originalIP = clientSocket.remoteAddress || '0.0.0.0';
+    const originalPort = clientSocket.remotePort || 0;
+    const targetStr = `${rule.target.host}:${rule.target.tcp}`;
+    
     // Initial connection notice (kept brief)
-    console.log(`[TCP] ${clientAddr} => ${rule.target.host}:${rule.target.tcp}`);
+    console.log(`[TCP] ${clientAddr} => ${targetStr}`);
     clientSocket.pause();
     let firstChunk: Buffer | null = null;
     let firstChunkHandled = false;
     let destConnected = false;
+    
     const destSocket = net.connect(rule.target.tcp!, rule.target.host, async () => {
       destConnected = true;
       try {
-        let originalIP = clientSocket.remoteAddress || '0.0.0.0';
-        let originalPort = clientSocket.remotePort || 0;
+        let proxyIP = originalIP;
+        let proxyPort = originalPort;
         if (firstChunk) {
           try {
             const chain = parseProxyV2Chain(firstChunk);
             if (chain.headers.length > 0) {
               const orig = getOriginalClientFromHeaders(chain.headers);
               if (orig) {
-                originalIP = orig.ip || originalIP;
-                originalPort = orig.port || originalPort;
+                proxyIP = orig.ip || proxyIP;
+                proxyPort = orig.port || proxyPort;
               }
               console.log('[TCP] parsed proxy chain on incoming connection', {
                 remote: `${clientSocket.remoteAddress}:${clientSocket.remotePort}`,
                 chainLayers: chain.headers.length,
-                original: `${originalIP}:${originalPort}`
+                original: `${proxyIP}:${proxyPort}`
               });
             }
           } catch (err) {
@@ -105,13 +121,13 @@ function startTcpProxy(rule: ListenerRule) {
           }
         }
 
-        // Log a simplified mapping using the resolved original IP/port (after parsing if available)
-        console.log(`[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+        // Log a simplified mapping
+        console.log(`[TCP] ${proxyIP}:${proxyPort} => ${targetStr}`);
 
         if (rule.haproxy) {
           const destIP = rule.target.host;
           const destPort = rule.target.tcp || 0;
-          const header = generateProxyProtocolV2Header(originalIP, originalPort, destIP, destPort, false /* stream */);
+          const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false /* stream */);
           destSocket.write(header, () => {
             if (firstChunk) {
               destSocket.write(firstChunk);
@@ -119,9 +135,22 @@ function startTcpProxy(rule: ListenerRule) {
             clientSocket.resume();
             clientSocket.pipe(destSocket);
             destSocket.pipe(clientSocket);
-            if (rule.webhook && !webhookSentForConn) {
+            
+            // Send webhook notification
+            if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
               webhookSentForConn = true;
-              void sendDiscordWebhook(rule.webhook, `[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+              if (useRestApi) {
+                // REST API mode: add to buffer, Management API will handle webhook notification
+                connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {
+                  // Management API handles webhook notification
+                });
+              } else {
+                // Non-REST API mode: send immediately
+                void sendDiscordWebhookEmbed(
+                  rule.webhook,
+                  createConnectionEmbed(proxyIP, proxyPort, 'TCP', targetStr)
+                );
+              }
             }
           });
         } else {
@@ -130,9 +159,22 @@ function startTcpProxy(rule: ListenerRule) {
           clientSocket.resume();
           clientSocket.pipe(destSocket);
           destSocket.pipe(clientSocket);
-          if (rule.webhook && !webhookSentForConn) {
+          
+          // Send webhook notification
+          if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
             webhookSentForConn = true;
-            void sendDiscordWebhook(rule.webhook, `[TCP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.tcp}`);
+            if (useRestApi) {
+              // REST API mode: add to buffer, Management API will handle webhook notification
+              connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {
+                // Management API handles webhook notification
+              });
+            } else {
+              // Non-REST API mode: send immediately
+              void sendDiscordWebhookEmbed(
+                rule.webhook,
+                createConnectionEmbed(proxyIP, proxyPort, 'TCP', targetStr)
+              );
+            }
           }
         }
       } catch (err) {
@@ -169,7 +211,7 @@ function startTcpProxy(rule: ListenerRule) {
 }
 
 // UDP proxy
-function startUdpProxy(rule: ListenerRule) {
+function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
   if (!rule.udp || !rule.target.udp) return;
   const bindAddr = rule.bind || '0.0.0.0';
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
@@ -179,6 +221,7 @@ function startUdpProxy(rule: ListenerRule) {
     clientAddress: string;
     clientPort: number;
     destSocket: dgram.Socket;
+    playerName?: string;
     headerSent?: boolean;
     notified?: boolean;
     logged?: boolean;
@@ -198,6 +241,7 @@ function startUdpProxy(rule: ListenerRule) {
   server.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
     const key = sessionKey(rinfo.address, rinfo.port);
     let session = sessions.get(key);
+    
     if (!session) {
       // Create a new socket for talking to destination
       const destSocket = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
@@ -217,6 +261,7 @@ function startUdpProxy(rule: ListenerRule) {
         clientAddress: rinfo.address,
         clientPort: rinfo.port,
         destSocket,
+        playerName: undefined,
         headerSent: false,
         notified: false,
         logged: false,
@@ -225,12 +270,66 @@ function startUdpProxy(rule: ListenerRule) {
 
       const CLEANUP_MS = 60_000; // 60s
       session.timer = setTimeout(() => {
+        // Notify on leave if webhook configured
+        if (rule.webhook && rule.webhook.trim() !== '') {
+          if (session?.playerName) {
+            void sendDiscordWebhookEmbed(
+              rule.webhook,
+              createPlayerLeaveEmbed(
+                session.playerName,
+                session.clientAddress,
+                session.clientPort,
+                'UDP'
+              )
+            );
+          } else {
+            // If using REST API, do not send generic disconnection embeds for unknown players
+            if (!useRestApi) {
+              void sendDiscordWebhookEmbed(
+                rule.webhook,
+                createDisconnectionEmbed(
+                  session!.clientAddress,
+                  session!.clientPort,
+                  'UDP',
+                  `${rule.target.host}:${rule.target.udp}`
+                )
+              );
+            }
+          }
+        }
         destSocket.close();
         sessions.delete(key);
       }, CLEANUP_MS);
     } else {
-      if (session.timer) clearTimeout(session.timer);
+      if (session.timer) clearTimeout(session.timer as any);
       session.timer = setTimeout(() => {
+        // Notify on leave if webhook configured
+        if (rule.webhook && rule.webhook.trim() !== '') {
+          if (session?.playerName) {
+            void sendDiscordWebhookEmbed(
+              rule.webhook,
+              createPlayerLeaveEmbed(
+                session.playerName,
+                session.clientAddress,
+                session.clientPort,
+                'UDP'
+              )
+            );
+          } else {
+            // If using REST API, do not send generic disconnection embeds for unknown players
+            if (!useRestApi) {
+              void sendDiscordWebhookEmbed(
+                rule.webhook,
+                createDisconnectionEmbed(
+                  session!.clientAddress,
+                  session!.clientPort,
+                  'UDP',
+                  `${rule.target.host}:${rule.target.udp}`
+                )
+              );
+            }
+          }
+        }
         session?.destSocket.close();
         sessions.delete(key);
       }, 60_000);
@@ -277,38 +376,22 @@ function startUdpProxy(rule: ListenerRule) {
         session!.logged = true;
       }
 
-      // If webhook configured, aggregate notifications per target and dedupe by IP
-      if (rule.webhook && !session!.notified) {
+      // If webhook configured, handle notifications
+      if (rule.webhook && !session!.notified && rule.webhook.trim() !== '') {
         session!.notified = true;
         const targetKey = `${rule.target.host}:${rule.target.udp}`;
-        let ipMap = groupedClients.get(targetKey);
-        if (!ipMap) {
-          ipMap = new Map<string, Set<number>>();
-          groupedClients.set(targetKey, ipMap);
-        }
-        const ports = ipMap.get(originalIP) || new Set<number>();
-        ports.add(originalPort);
-        ipMap.set(originalIP, ports);
-
-        // Schedule a grouped notification shortly (debounce)
-        if (!groupTimers.has(targetKey)) {
-          const t = setTimeout(() => {
-            const map = groupedClients.get(targetKey);
-            if (!map) return;
-            const parts: string[] = [];
-            for (const [ip, portsSet] of map.entries()) {
-              if (portsSet.size === 0) parts.push(ip);
-              else if (portsSet.size === 1) parts.push(`${ip}:${Array.from(portsSet)[0]}`);
-              else parts.push(`${ip}(${Array.from(portsSet).join(',')})`);
-            }
-            // Format aggregated notification as "clients => target"
-            const body = `[UDP] ${parts.join(', ')} => ${targetKey}`;
-            // Send aggregated webhook (do not duplicate this aggregated line to console)
-            void sendDiscordWebhook(rule.webhook!, body);
-            groupedClients.delete(targetKey);
-            groupTimers.delete(targetKey);
-          }, 500);
-          groupTimers.set(targetKey, t);
+        
+        if (useRestApi) {
+          // REST API mode: add to buffer, Management API will handle webhook notification
+          connectionBuffer.addPending(originalIP, originalPort, 'UDP', targetKey, () => {
+            // Management API handles webhook notification
+          });
+        } else {
+          // Non-REST API mode: send immediately
+          void sendDiscordWebhookEmbed(
+            rule.webhook,
+            createConnectionEmbed(originalIP, originalPort, 'UDP', targetKey)
+          );
         }
       }
     });
@@ -328,11 +411,34 @@ function startUdpProxy(rule: ListenerRule) {
 
 function main() {
   try {
-    const cfg = loadConfig();
-    for (const rule of cfg.listeners) {
-      if (rule.tcp && rule.target.tcp) startTcpProxy(rule);
-      if (rule.udp && rule.target.udp) startUdpProxy(rule);
+    const cfg = loadConfig() as any;
+    const endpointPort = cfg.endpoint || 6000;
+    const useRestApi = cfg.useRestApi ?? false;
+    const savePlayerIP = cfg.savePlayerIP ?? true;
+    
+    // Initialize PlayerIPMapper
+    const playerIPFilePath = path.join(process.cwd(), 'playerIP.json');
+    const playerIPMapper = new PlayerIPMapper(playerIPFilePath, savePlayerIP);
+    
+    // Start management API (optional)
+    if (useRestApi) {
+      const webhooks = cfg.listeners
+        .map((rule: any) => rule.webhook)
+        .filter((hook: any) => hook && hook.trim() !== '');
+      startManagementAPI(endpointPort, playerMapper, connectionBuffer, playerIPMapper, useRestApi, webhooks);
     }
+    
+    // Start periodic cleanup
+    setInterval(() => {
+      playerMapper.cleanup();
+    }, 60_000); // Every 60 seconds
+    
+    for (const rule of cfg.listeners) {
+      if (rule.tcp && rule.target.tcp) startTcpProxy(rule, useRestApi);
+      if (rule.udp && rule.target.udp) startUdpProxy(rule, useRestApi);
+    }
+    
+    console.log(`[Main] REST API Mode: ${useRestApi ? 'ENABLED' : 'DISABLED'}`);
   } catch (err) {
     console.error('Failed to start proxy', (err as Error).message);
     process.exit(1);
