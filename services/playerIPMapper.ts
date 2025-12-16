@@ -9,11 +9,11 @@ export interface PlayerIPRecord {
   username: string;
   ips: Array<{
     ip: string;
-    ports: number[];
     protocol: 'TCP' | 'UDP';
     lastSeen: number;
   }>;
 }
+
 
 export class PlayerIPMapper {
   private storage: Map<string, PlayerIPRecord> = new Map();
@@ -35,11 +35,24 @@ export class PlayerIPMapper {
     try {
       if (fs.existsSync(this.filePath)) {
         const data = fs.readFileSync(this.filePath, 'utf-8');
-        const records: PlayerIPRecord[] = JSON.parse(data);
+        // Normalize older records (remove ports, keep only the most recent IP entry per user)
+        const parsed: any[] = JSON.parse(data);
+        const records: PlayerIPRecord[] = parsed.map((r: any) => {
+          const username = r.username;
+          const ipsArr = Array.isArray(r.ips) ? r.ips : [];
+          let latest: any = null;
+          for (const e of ipsArr) {
+            if (!latest || (e.lastSeen && e.lastSeen > (latest.lastSeen || 0))) latest = e;
+          }
+          const normalizedIps = latest ? [{ ip: latest.ip, protocol: latest.protocol, lastSeen: latest.lastSeen || Date.now() }] : [];
+          return { username, ips: normalizedIps };
+        });
         for (const record of records) {
           this.storage.set(record.username, record);
         }
         console.log(`[PlayerIPMapper] Loaded ${records.length} player IP records`);
+        // Persist normalized format back to disk
+        this.save();
       }
     } catch (err) {
       console.error('[PlayerIPMapper] Failed to load file:', err instanceof Error ? err.message : String(err));
@@ -75,23 +88,21 @@ export class PlayerIPMapper {
       this.storage.set(username, record);
     }
 
-    // Find existing IP record
-    let ipRecord = record.ips.find(r => r.ip === ip && r.protocol === protocol);
-    if (!ipRecord) {
-      ipRecord = {
-        ip,
-        ports: [],
-        protocol,
-        lastSeen: Date.now(),
-      };
-      record.ips.push(ipRecord);
-    }
+    const now = Date.now();
 
-    // Add port if not already present
-    if (!ipRecord.ports.includes(port)) {
-      ipRecord.ports.push(port);
+    // We no longer store ports. Keep only a single most-recent IP entry per username.
+    if (record.ips.length === 0) {
+      record.ips = [{ ip, protocol, lastSeen: now }];
+    } else {
+      const existing = record.ips[0];
+      // Overwrite if IP or protocol changed
+      if (existing.ip !== ip || existing.protocol !== protocol) {
+        existing.ip = ip;
+        existing.protocol = protocol;
+      }
+      existing.lastSeen = now;
+      record.ips = [existing];
     }
-    ipRecord.lastSeen = Date.now();
 
     this.save();
   }

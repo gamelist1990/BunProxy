@@ -68,3 +68,4 @@ config.yml
 # .next/
 # .vercel/
 # dist
+playerIP.json

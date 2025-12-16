@@ -146,7 +146,7 @@ export function startManagementAPI(
             const ipRecord = playerIPMapper.getPlayerIPs(username);
             
             if (ipRecord && ipRecord.ips.length > 0) {
-              // Group IPs by protocol
+              // Group IPs by protocol (ports are no longer recorded; pass empty list)
               const grouped = new Map<string, { ip: string; ports: number[]; protocol: 'TCP' | 'UDP' }>();
               
               for (const ipInfo of ipRecord.ips) {
@@ -154,7 +154,7 @@ export function startManagementAPI(
                 if (!grouped.has(key)) {
                   grouped.set(key, {
                     ip: ipInfo.ip,
-                    ports: [...ipInfo.ports],
+                    ports: [],
                     protocol: ipInfo.protocol,
                   });
                 }

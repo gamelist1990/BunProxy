@@ -8,21 +8,9 @@ import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
 import { ConnectionBuffer } from './services/connectionBuffer.js';
 import { PlayerIPMapper } from './services/playerIPMapper.js';
 import { startManagementAPI } from './services/managementAPI.js';
-import { sendDiscordWebhookEmbed, createPlayerJoinEmbed, createPlayerLeaveEmbed, createConnectionEmbed, createDisconnectionEmbed } from './services/discordEmbed.js';
+import { sendDiscordWebhookEmbed, createPlayerLeaveEmbed, createConnectionEmbed, createDisconnectionEmbed } from './services/discordEmbed.js';
 import YAML from 'yaml';
 
-async function sendDiscordWebhook(webhookUrl: string, content: string): Promise<void> {
-  try {
-    if (!webhookUrl || webhookUrl.trim() === '') return;
-    await fetch(webhookUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-  } catch (err) {
-    try { console.error('[Webhook] Failed to send webhook', err instanceof Error ? err.message : String(err)); } catch (_) {}
-  }
-}
 
 
 type ListenerRule = {
