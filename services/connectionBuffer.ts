@@ -54,7 +54,7 @@ export class ConnectionBuffer {
    * Process pending connection with player name
    */
   processPendingForPlayer(
-    playerName: string,
+    _playerName: string,
     timestamp: number
   ): { matched: PendingConnection[]; unmatched: PendingConnection[] } {
     const matched: PendingConnection[] = [];

@@ -1,10 +1,5 @@
 import fs from 'fs';
-import path from 'path';
 
-/**
- * Player IP mapping storage
- * Maps username to IP addresses and ports for logout notifications
- */
 export interface PlayerIPRecord {
   username: string;
   ips: Array<{
@@ -28,14 +23,10 @@ export class PlayerIPMapper {
     }
   }
 
-  /**
-   * Load player IP mappings from file
-   */
   private load(): void {
     try {
       if (fs.existsSync(this.filePath)) {
         const data = fs.readFileSync(this.filePath, 'utf-8');
-        // Normalize older records (remove ports, keep only the most recent IP entry per user)
         const parsed: any[] = JSON.parse(data);
         const records: PlayerIPRecord[] = parsed.map((r: any) => {
           const username = r.username;
@@ -51,7 +42,6 @@ export class PlayerIPMapper {
           this.storage.set(record.username, record);
         }
         console.log(`[PlayerIPMapper] Loaded ${records.length} player IP records`);
-        // Persist normalized format back to disk
         this.save();
       }
     } catch (err) {
@@ -59,12 +49,10 @@ export class PlayerIPMapper {
     }
   }
 
-  /**
-   * Save player IP mappings to file
-   */
+
   private save(): void {
     if (!this.enabled) return;
-    
+
     try {
       const records = Array.from(this.storage.values());
       fs.writeFileSync(this.filePath, JSON.stringify(records, null, 2), 'utf-8');
@@ -73,9 +61,7 @@ export class PlayerIPMapper {
     }
   }
 
-  /**
-   * Register player IP and port
-   */
+
   registerPlayerIP(username: string, ip: string, port: number, protocol: 'TCP' | 'UDP'): void {
     if (!this.enabled) return;
 
@@ -90,12 +76,10 @@ export class PlayerIPMapper {
 
     const now = Date.now();
 
-    // We no longer store ports. Keep only a single most-recent IP entry per username.
     if (record.ips.length === 0) {
       record.ips = [{ ip, protocol, lastSeen: now }];
     } else {
       const existing = record.ips[0];
-      // Overwrite if IP or protocol changed
       if (existing.ip !== ip || existing.protocol !== protocol) {
         existing.ip = ip;
         existing.protocol = protocol;
@@ -107,37 +91,29 @@ export class PlayerIPMapper {
     this.save();
   }
 
-  /**
-   * Get player IPs
-   */
+
   getPlayerIPs(username: string): PlayerIPRecord | undefined {
     return this.storage.get(username);
   }
 
-  /**
-   * Remove player record (optional, for cleanup)
-   */
+
   removePlayer(username: string): void {
     if (!this.enabled) return;
-    
+
     this.storage.delete(username);
     this.save();
   }
 
-  /**
-   * Clean up old records (older than specified days)
-   */
+
   cleanup(olderThanDays: number = 30): void {
     if (!this.enabled) return;
-    
+
     const cutoff = Date.now() - (olderThanDays * 24 * 60 * 60 * 1000);
     let cleaned = 0;
 
     for (const [username, record] of this.storage.entries()) {
-      // Filter out old IP records
       record.ips = record.ips.filter(ip => ip.lastSeen > cutoff);
-      
-      // Remove player if no IPs left
+
       if (record.ips.length === 0) {
         this.storage.delete(username);
         cleaned++;

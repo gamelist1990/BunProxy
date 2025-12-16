@@ -47,14 +47,12 @@ export function startManagementAPI(
 
           playerMapper.registerLogin(timestamp, username);
 
-          // If REST API is enabled, process pending connections
           if (useRestApi) {
             const { matched } = connectionBuffer.processPendingForPlayer(username, timestamp);
             
             console.log(`[Management API] Player login: ${username}`);
             
-            // Process all matched pending connections
-            // Group by IP and protocol to avoid duplicate notifications
+        
             const grouped = new Map<string, { ip: string; ports: number[]; protocol: 'TCP' | 'UDP'; target: string }>();
             
             for (const pending of matched) {
@@ -62,7 +60,6 @@ export function startManagementAPI(
                 `[${pending.protocol}] ${pending.ip}:${pending.port} [${username}] => ${pending.target}`
               );
               
-              // Save player IP mapping
               playerIPMapper.registerPlayerIP(username, pending.ip, pending.port, pending.protocol);
               
               const groupKey = `${pending.ip}:${pending.protocol}`;
@@ -77,7 +74,6 @@ export function startManagementAPI(
               grouped.get(groupKey)!.ports.push(pending.port);
             }
 
-            // Send Discord notification if webhooks provided (one per IP/protocol group)
             if (webhooks) {
               for (const group of grouped.values()) {
                 for (const webhook of webhooks) {
@@ -91,7 +87,6 @@ export function startManagementAPI(
               }
             }
 
-              // If no pending connections matched, still send a login notification
               if (webhooks && matched.length === 0) {
                 for (const webhook of webhooks) {
                   if (webhook && webhook.trim() !== '') {
@@ -140,13 +135,10 @@ export function startManagementAPI(
           playerMapper.registerLogout(timestamp, username);
           console.log(`[Management API] Player logout: ${username}`);
 
-          // Send Discord notification if webhooks provided
           if (webhooks && useRestApi) {
-            // Get saved IP information
             const ipRecord = playerIPMapper.getPlayerIPs(username);
             
             if (ipRecord && ipRecord.ips.length > 0) {
-              // Group IPs by protocol (ports are no longer recorded; pass empty list)
               const grouped = new Map<string, { ip: string; ports: number[]; protocol: 'TCP' | 'UDP' }>();
               
               for (const ipInfo of ipRecord.ips) {
@@ -160,7 +152,6 @@ export function startManagementAPI(
                 }
               }
               
-              // Send notification for each IP/protocol group
               for (const group of grouped.values()) {
                 for (const webhook of webhooks) {
                   if (webhook && webhook.trim() !== '') {
@@ -172,7 +163,6 @@ export function startManagementAPI(
                 }
               }
             } else {
-              // No IP info available, send without IP
               for (const webhook of webhooks) {
                 if (webhook && webhook.trim() !== '') {
                   void sendDiscordWebhookEmbed(

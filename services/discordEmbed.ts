@@ -75,6 +75,60 @@ export function createConnectionEmbed(
 }
 
 /**
+ * Create grouped connection embed (combine multiple ports for same IP/target)
+ */
+export function createGroupedConnectionEmbed(
+  target: string,
+  protocol: 'TCP' | 'UDP',
+  groups: Array<{ ip: string; ports: number[] }>
+): DiscordEmbed {
+  const lines = groups.map(g => {
+    const portText = g.ports.length === 1 ? String(g.ports[0]) : g.ports.map(p => String(p)).join(', ');
+    return `[${protocol}] ${g.ip}:${portText} => ${target}`;
+  }).join('\n');
+
+  return {
+    title: `接続確立`,
+    description: `通知 (${protocol})`,
+    color: 0x3498db,
+    timestamp: new Date().toISOString(),
+    fields: [
+      { name: '接続一覧', value: lines }
+    ],
+    footer: {
+      text: 'BunProxy',
+    },
+  };
+}
+
+/**
+ * Create grouped disconnection embed (combine multiple ports for same IP/target)
+ */
+export function createGroupedDisconnectionEmbed(
+  target: string,
+  protocol: 'TCP' | 'UDP',
+  groups: Array<{ ip: string; ports: number[] }>
+): DiscordEmbed {
+  const lines = groups.map(g => {
+    const portText = g.ports.length === 1 ? String(g.ports[0]) : g.ports.map(p => String(p)).join(', ');
+    return `[${protocol}] ${g.ip}:${portText} => ${target}`;
+  }).join('\n');
+
+  return {
+    title: `接続終了`,
+    description: `通知 (${protocol})`,
+    color: 0xe74c3c,
+    timestamp: new Date().toISOString(),
+    fields: [
+      { name: '切断一覧', value: lines }
+    ],
+    footer: {
+      text: 'BunProxy',
+    },
+  };
+}
+
+/**
  * Create disconnection embed (when player name is unknown)
  */
 export function createDisconnectionEmbed(
