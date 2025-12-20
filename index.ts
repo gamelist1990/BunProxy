@@ -131,7 +131,7 @@ function addToDisconnectGroup(webhook: string, targetKey: string, ip: string, po
 
 
 // Check if target host:port is reachable
-async function checkTargetReachability(host: string, port: number, protocol: 'TCP' | 'UDP', timeout = 3000): Promise<{ reachable: boolean; latency?: number; error?: string }> {
+async function checkTargetReachability(host: string, port: number, protocol: 'TCP' | 'UDP', timeout = 5000): Promise<{ reachable: boolean; latency?: number; error?: string }> {
   const startTime = Date.now();
   
   if (protocol === 'TCP') {
@@ -144,8 +144,19 @@ async function checkTargetReachability(host: string, port: number, protocol: 'TC
         resolve({ reachable: true, latency });
       });
       
-      socket.on('error', (err) => {
-        resolve({ reachable: false, error: err.message });
+      socket.on('error', (err: any) => {
+        const errorCode = err.code || err.message;
+        let errorMsg = errorCode;
+        if (errorCode === 'ECONNREFUSED') {
+          errorMsg = 'Connection refused (port not open)';
+        } else if (errorCode === 'ETIMEDOUT' || errorCode === 'EHOSTUNREACH') {
+          errorMsg = 'Host unreachable (timeout)';
+        } else if (errorCode === 'ENOTFOUND') {
+          errorMsg = 'Host not found (DNS resolution failed)';
+        } else if (errorCode === 'ENETUNREACH') {
+          errorMsg = 'Network unreachable';
+        }
+        resolve({ reachable: false, error: errorMsg });
       });
       
       socket.on('timeout', () => {
@@ -171,18 +182,30 @@ async function checkTargetReachability(host: string, port: number, protocol: 'TC
         resolve({ reachable: true, latency });
       });
       
-      socket.on('error', (err) => {
+      socket.on('error', (err: any) => {
         clearTimeout(timeoutId);
         socket.close();
-        resolve({ reachable: false, error: err.message });
+        const errorCode = err.code || err.message;
+        let errorMsg = errorCode;
+        if (errorCode === 'EACCES') {
+          errorMsg = 'Permission denied (firewall?)';
+        } else if (errorCode === 'ENETUNREACH') {
+          errorMsg = 'Network unreachable';
+        }
+        resolve({ reachable: false, error: errorMsg });
       });
       
       // Send empty probe packet
-      socket.send(Buffer.alloc(0), port, host, (err) => {
+      socket.send(Buffer.alloc(0), port, host, (err: any) => {
         if (err) {
           clearTimeout(timeoutId);
           socket.close();
-          resolve({ reachable: false, error: err.message });
+          const errorCode = err.code || err.message;
+          let errorMsg = errorCode;
+          if (errorCode === 'ENETUNREACH') {
+            errorMsg = 'Network unreachable';
+          }
+          resolve({ reachable: false, error: errorMsg });
         }
       });
     });
