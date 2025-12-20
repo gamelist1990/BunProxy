@@ -10,6 +10,7 @@ import { PlayerIPMapper } from './services/playerIPMapper.js';
 import { startManagementAPI } from './services/managementAPI.js';
 import { sendDiscordWebhookEmbed, createPlayerLeaveEmbed, createConnectionEmbed, createDisconnectionEmbed, createGroupedConnectionEmbed, createGroupedDisconnectionEmbed } from './services/discordEmbed.js';
 import YAML from 'yaml';
+import dns from 'dns';
 
 
 
@@ -123,8 +124,9 @@ function addToDisconnectGroup(webhook: string, targetKey: string, ip: string, po
 function writeDefaultConfig() {
   const defaultConfig = {
     endpoint: 6000,
+    useRestApi: false,
     savePlayerIP: true,
-    listeners: [
+    listeners: [ 
       {
         bind: '0.0.0.0',
         tcp: 8000,
@@ -200,8 +202,16 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         console.log(`[TCP] ${proxyIP}:${proxyPort} => ${targetStr}`);
 
         if (rule.haproxy) {
-          const destIP = rule.target.host;
           const destPort = rule.target.tcp || 0;
+          let destIP = rule.target.host;
+          try {
+            if (net.isIP(destIP) === 0) {
+              const addr = await dns.promises.lookup(destIP);
+              destIP = addr.address;
+            }
+          } catch (err) {
+            console.warn('[TCP] Failed to resolve destination host for PROXY header, using original host', err instanceof Error ? err.message : String(err));
+          }
           const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false /* stream */);
           destSocket.write(header, () => {
             if (firstChunk) {
@@ -286,6 +296,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     headerSent?: boolean;
     notified?: boolean;
     logged?: boolean;
+    destHostResolved?: string;
     timer?: ReturnType<typeof setTimeout>;
   };
 
@@ -323,8 +334,23 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         headerSent: false,
         notified: false,
         logged: false,
+        destHostResolved: undefined,
       };
       sessions.set(key, session);
+
+      // Resolve target host to numeric IP for PROXY header (supports hostnames and local IPs like Tailscale)
+      (async () => {
+        try {
+          let resolved = rule.target.host;
+          if (net.isIP(resolved) === 0) {
+            const addr = await dns.promises.lookup(rule.target.host);
+            resolved = addr.address;
+          }
+          session!.destHostResolved = resolved;
+        } catch (err) {
+          session!.destHostResolved = rule.target.host;
+        }
+      })();
 
       const CLEANUP_MS = 60_000; // 60s
       session.timer = setTimeout(() => {
@@ -395,7 +421,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     let payload = actualPayload;
     if (rule.haproxy && !session.headerSent) {
       try {
-        const header = generateProxyProtocolV2Header(originalIP, originalPort, rule.target.host, rule.target.udp!, true /* dgram */);
+        const header = generateProxyProtocolV2Header(originalIP, originalPort, session.destHostResolved ?? rule.target.host, rule.target.udp!, true /* dgram */);
         payload = Buffer.concat([header, actualPayload]); // First packet: PROXY header + payload
         session.headerSent = true;
       } catch (err) {
