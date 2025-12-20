@@ -14,143 +14,7 @@ import dns from 'dns';
 import chalk from 'chalk';
 import Table from 'cli-table3';
 import boxen from 'boxen';
-import os from 'os';
-import { execSync } from 'child_process';
 
-// Iptables rule tracking for cleanup
-const addedIptablesRules: Array<{ chain: string; rule: string }> = [];
-
-// Check if running on Linux
-function isLinux(): boolean {
-  return os.platform() === 'linux';
-}
-
-// Execute iptables command safely
-function execIptables(command: string): { success: boolean; output?: string; error?: string } {
-  try {
-    const output = execSync(command, { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-    return { success: true, output };
-  } catch (err: any) {
-    return { success: false, error: err.message };
-  }
-}
-
-// Check if ts-forward chain exists and has DROP rules
-function checkTsForwardChain(): { exists: boolean; hasDrop: boolean } {
-  const result = execIptables('sudo iptables -L ts-forward -n 2>/dev/null');
-  if (!result.success || !result.output) {
-    return { exists: false, hasDrop: false };
-  }
-  const hasDrop = result.output.includes('DROP');
-  return { exists: true, hasDrop };
-}
-
-// Check if a specific iptables rule already exists
-function ruleExists(chain: string, ruleSpec: string): boolean {
-  const checkCmd = `sudo iptables -C ${chain} ${ruleSpec} 2>/dev/null`;
-  const result = execIptables(checkCmd);
-  return result.success;
-}
-
-// Add iptables rule if it doesn't exist
-function addIptablesRule(chain: string, ruleSpec: string, description: string): boolean {
-  if (ruleExists(chain, ruleSpec)) {
-    console.log(chalk.dim(`[Firewall] Rule already exists: ${description}`));
-    return true;
-  }
-
-  const addCmd = `sudo iptables -I ${chain} 1 ${ruleSpec}`;
-  const result = execIptables(addCmd);
-  
-  if (result.success) {
-    console.log(chalk.green(`[Firewall] ✓ Added rule: ${description}`));
-    addedIptablesRules.push({ chain, rule: ruleSpec });
-    return true;
-  } else {
-    console.error(chalk.red(`[Firewall] ✗ Failed to add rule: ${description}`));
-    console.error(chalk.red(`  Error: ${result.error}`));
-    return false;
-  }
-}
-
-// Remove all added iptables rules
-function cleanupIptablesRules(): void {
-  if (addedIptablesRules.length === 0) return;
-
-  console.log(chalk.yellow('\n[Firewall] Cleaning up iptables rules...'));
-  
-  for (const { chain, rule } of addedIptablesRules) {
-    const deleteCmd = `sudo iptables -D ${chain} ${rule}`;
-    const result = execIptables(deleteCmd);
-    
-    if (result.success) {
-      console.log(chalk.green(`[Firewall] ✓ Removed rule from ${chain}`));
-    } else {
-      console.error(chalk.red(`[Firewall] ✗ Failed to remove rule from ${chain}`));
-    }
-  }
-  
-  addedIptablesRules.length = 0;
-}
-
-// Setup firewall rules for target hosts
-function setupFirewallRules(listeners: ListenerRule[]): void {
-  if (!isLinux()) {
-    console.log(chalk.dim('[Firewall] Skipping iptables setup (not Linux)'));
-    return;
-  }
-
-  // Check if ts-forward chain exists and has DROP rules
-  const tsForward = checkTsForwardChain();
-  
-  if (!tsForward.exists) {
-    console.log(chalk.dim('[Firewall] ts-forward chain not found, skipping Tailscale rules'));
-    return;
-  }
-
-  if (!tsForward.hasDrop) {
-    console.log(chalk.dim('[Firewall] ts-forward has no DROP rules, skipping'));
-    return;
-  }
-
-  console.log(chalk.yellow('[Firewall] Detected ts-forward DROP rules, adding bypass rules...'));
-
-  // Collect unique target hosts
-  const targets = new Set<string>();
-  for (const rule of listeners) {
-    if (rule.target.host) {
-      targets.add(rule.target.host);
-    }
-  }
-
-  // Add rules for each target
-  let rulesAdded = 0;
-  for (const target of targets) {
-    for (const rule of listeners) {
-      if (rule.target.host !== target) continue;
-
-      // Add TCP rule if configured
-      if (rule.tcp && rule.target.tcp) {
-        const tcpRule = `-o tailscale0 -d ${target} -p tcp --dport ${rule.target.tcp} -j ACCEPT`;
-        if (addIptablesRule('ts-forward', tcpRule, `TCP ${target}:${rule.target.tcp}`)) {
-          rulesAdded++;
-        }
-      }
-
-      // Add UDP rule if configured
-      if (rule.udp && rule.target.udp) {
-        const udpRule = `-o tailscale0 -d ${target} -p udp --dport ${rule.target.udp} -j ACCEPT`;
-        if (addIptablesRule('ts-forward', udpRule, `UDP ${target}:${rule.target.udp}`)) {
-          rulesAdded++;
-        }
-      }
-    }
-  }
-
-  if (rulesAdded > 0) {
-    console.log(chalk.green(`[Firewall] ✓ Added ${rulesAdded} firewall rule(s)\n`));
-  }
-}
 
 
 type ListenerRule = {
@@ -854,8 +718,7 @@ async function main() {
       console.log(chalk.yellow('\n⚠ UDP services often don\'t respond to probe packets. Failed UDP checks may still work for actual traffic.'));
     }
     console.log('');
-    // Setup firewall rules (Linux only, with Tailscale detection)
-    setupFirewallRules(cfg.listeners);
+
     // Start services
     if (useRestApi) {
       const webhooks = cfg.listeners
@@ -914,19 +777,6 @@ async function main() {
       borderColor: 'green',
       textAlignment: 'center'
     }));
-
-    // Register cleanup handlers for graceful shutdown
-    process.on('SIGINT', () => {
-      console.log(chalk.yellow('\n\n[Server] Received SIGINT, shutting down gracefully...'));
-      cleanupIptablesRules();
-      process.exit(0);
-    });
-
-    process.on('SIGTERM', () => {
-      console.log(chalk.yellow('\n\n[Server] Received SIGTERM, shutting down gracefully...'));
-      cleanupIptablesRules();
-      process.exit(0);
-    });
 
   } catch (err) {
     console.error(chalk.bold.red('✗ Failed to start proxy:'), chalk.red((err as Error).message));
