@@ -264,135 +264,210 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     
     let clientToServerBytes = 0;
     let serverToClientBytes = 0;
+    let isClosed = false;
 
-    console.log(chalk.dim(`[TCP] ${clientAddr} => ${targetStr}`));
-    clientSocket.pause();
+    console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${targetStr}`));
+    
+    // タイムアウト設定
+    clientSocket.setTimeout(30000); // 30秒のタイムアウト
+    
     let firstChunk: Buffer | null = null;
-    let firstChunkHandled = false;
     let destConnected = false;
+    let destSocket: net.Socket | null = null;
 
-    const destSocket = net.connect(rule.target.tcp!, rule.target.host, async () => {
-      destConnected = true;
-      console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
-      try {
-        let proxyIP = originalIP;
-        let proxyPort = originalPort;
-        if (firstChunk) {
-          try {
-            const chain = parseProxyV2Chain(firstChunk);
-            if (chain.headers.length > 0) {
-              const orig = getOriginalClientFromHeaders(chain.headers);
-              if (orig) {
-                proxyIP = orig.ip || proxyIP;
-                proxyPort = orig.port || proxyPort;
-              }
-              console.log('[TCP] parsed proxy chain on incoming connection', {
-                remote: `${clientSocket.remoteAddress}:${clientSocket.remotePort}`,
-                chainLayers: chain.headers.length,
-                original: `${proxyIP}:${proxyPort}`
-              });
+    // クリーンアップ関数
+    const cleanup = () => {
+      if (isClosed) return;
+      isClosed = true;
+      connectionStats.tcp.active--;
+      
+      if (destSocket && !destSocket.destroyed) {
+        destSocket.destroy();
+      }
+      if (!clientSocket.destroyed) {
+        clientSocket.destroy();
+      }
+      
+      if (destConnected) {
+        console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
+      } else {
+        console.log(chalk.red(`[TCP] Connection failed ${clientAddr} => ${targetStr}`));
+      }
+    };
+
+    // 最初のデータを待つ
+    clientSocket.once('data', async (buf) => {
+      firstChunk = buf;
+      
+      let proxyIP = originalIP;
+      let proxyPort = originalPort;
+      
+      // Proxy Protocolヘッダーのパース
+      if (buf.length > 16) {
+        try {
+          const chain = parseProxyV2Chain(buf);
+          if (chain.headers.length > 0) {
+            const orig = getOriginalClientFromHeaders(chain.headers);
+            if (orig) {
+              proxyIP = orig.ip || proxyIP;
+              proxyPort = orig.port || proxyPort;
             }
-          } catch (err) {
-            console.log('[TCP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
+            console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
+              layers: chain.headers.length,
+              original: `${proxyIP}:${proxyPort}`
+            });
           }
+        } catch (err) {
+          // Proxy headerではない通常のデータ
         }
+      }
 
-        console.log(`[TCP] ${proxyIP}:${proxyPort} => ${targetStr}`);
+      console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr}`));
 
-        if (rule.haproxy) {
-          const destPort = rule.target.tcp || 0;
-          let destIP = rule.target.host;
-          try {
-            if (net.isIP(destIP) === 0) {
-              const addr = await dns.promises.lookup(destIP);
-              destIP = addr.address;
+      // 宛先への接続
+      destSocket = net.createConnection({
+        host: rule.target.host,
+        port: rule.target.tcp!,
+        timeout: 10000 // 10秒のタイムアウト
+      });
+
+      destSocket.on('connect', async () => {
+        destConnected = true;
+        console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
+        
+        try {
+          if (rule.haproxy) {
+            // HAProxy PROXY Protocolヘッダーを送信
+            const destPort = rule.target.tcp || 0;
+            let destIP = rule.target.host;
+            
+            // ホスト名をIPアドレスに解決
+            try {
+              if (net.isIP(destIP) === 0) {
+                const addr = await dns.promises.lookup(destIP);
+                destIP = addr.address;
+                console.log(chalk.dim(`[TCP] Resolved ${rule.target.host} to ${destIP}`));
+              }
+            } catch (err) {
+              console.warn(chalk.yellow('[TCP] Failed to resolve destination host, using original host'), err instanceof Error ? err.message : String(err));
             }
-          } catch (err) {
-            console.warn('[TCP] Failed to resolve destination host for PROXY header, using original host', err instanceof Error ? err.message : String(err));
-          }
-          const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false /* stream */);
-          console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
-          destSocket.write(header, () => {
-            if (firstChunk) {
-              console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
-              destSocket.write(firstChunk);
-            }
-            clientSocket.resume();
             
-            clientSocket.on('data', (chunk) => {
-              clientToServerBytes += chunk.length;
-            });
+            const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
+            console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
             
-            destSocket.on('data', (chunk) => {
-              serverToClientBytes += chunk.length;
-            });
-            
-            clientSocket.pipe(destSocket);
-            destSocket.pipe(clientSocket);
-
-            if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
-              webhookSentForConn = true;
-              if (useRestApi) {
-                connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {
+            destSocket!.write(header, (err) => {
+              if (err) {
+                console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
+                cleanup();
+                return;
+              }
+              
+              // 最初のデータを送信
+              if (firstChunk) {
+                console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+                destSocket!.write(firstChunk, (err) => {
+                  if (err) {
+                    console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                    cleanup();
+                    return;
+                  }
+                  setupPiping();
                 });
               } else {
-                addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
+                setupPiping();
               }
+            });
+          } else {
+            // HAProxyなしの場合
+            if (firstChunk) {
+              destSocket!.write(firstChunk, (err) => {
+                if (err) {
+                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                  cleanup();
+                  return;
+                }
+                setupPiping();
+              });
+            } else {
+              setupPiping();
             }
-          });
-        } else {
-          if (firstChunk) destSocket.write(firstChunk);
-          clientSocket.resume();
-          clientSocket.pipe(destSocket);
-          destSocket.pipe(clientSocket);
+          }
 
+          // Webhookの送信
           if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
             webhookSentForConn = true;
             if (useRestApi) {
-              connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {
-              });
+              connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {});
             } else {
-              // Non-REST API mode: aggregate notifications to avoid spam
               addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
             }
           }
+        } catch (err) {
+          console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
+          cleanup();
         }
-      } catch (err) {
-        console.error('[TCP] Failed to send PROXY header', err instanceof Error ? err.message : String(err));
-        clientSocket.resume();
-        clientSocket.pipe(destSocket);
-        destSocket.pipe(clientSocket);
-      }
+      });
+
+      const setupPiping = () => {
+        // データのパイプ設定
+        clientSocket.on('data', (chunk) => {
+          clientToServerBytes += chunk.length;
+        });
+        
+        destSocket!.on('data', (chunk) => {
+          serverToClientBytes += chunk.length;
+        });
+        
+        clientSocket.pipe(destSocket!);
+        destSocket!.pipe(clientSocket);
+        
+        console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+      };
+
+      destSocket.on('error', (err: Error) => {
+        console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
+        if (err.message.includes('ECONNREFUSED')) {
+          console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${targetStr}?`));
+        } else if (err.message.includes('ETIMEDOUT')) {
+          console.error(chalk.red(`[TCP]   → Connection timed out. Check network connectivity.`));
+        } else if (err.message.includes('EHOSTUNREACH')) {
+          console.error(chalk.red(`[TCP]   → Host unreachable. Check firewall and routing.`));
+        }
+        cleanup();
+      });
+
+      destSocket.on('timeout', () => {
+        console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${targetStr}`));
+        cleanup();
+      });
+
+      destSocket.on('close', () => {
+        if (!isClosed) {
+          console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
+          cleanup();
+        }
+      });
     });
-    destSocket.on('error', (err: Error) => {
-      console.error(chalk.red(`[TCP] ✗ Destination error ${targetStr}:`), err.message);
-      if (!destConnected) {
-        console.error(chalk.red(`[TCP] ✗ Failed to connect to target ${targetStr}`));
-      }
-      clientSocket.end();
-    });
+
     clientSocket.on('error', (err: Error) => {
-      console.error(chalk.red('[TCP] Client socket error'), err.message);
-      destSocket.end();
+      console.error(chalk.red('[TCP] Client socket error:'), err.message);
+      cleanup();
+    });
+
+    clientSocket.on('timeout', () => {
+      console.error(chalk.red('[TCP] Client socket timeout'));
+      cleanup();
     });
     
     clientSocket.on('close', () => {
-      connectionStats.tcp.active--;
-      if (destConnected) {
-        console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes || 0}B, recv: ${serverToClientBytes || 0}B)`));
-      }
-    });
-
-    clientSocket.once('data', (buf) => {
-      firstChunk = buf;
-      if (destConnected && !firstChunkHandled) {
-        firstChunkHandled = true;
+      if (!isClosed) {
+        cleanup();
       }
     });
   });
 
   server.on('error', (err: Error) => {
-    console.error('[TCP] Server error', err);
+    console.error(chalk.red('[TCP] Server error:'), err.message);
   });
 
   server.listen(rule.tcp, bindAddr, () => {
