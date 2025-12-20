@@ -665,31 +665,57 @@ async function main() {
     await Promise.all(checks);
 
     // Display reachability results
+    const failedChecks: Array<{ rule: ListenerRule; protocol: 'TCP' | 'UDP'; result: Awaited<ReturnType<typeof checkTargetReachability>> }> = [];
+    
     for (const { rule, protocol, result } of results) {
       const bindAddr = `${rule.bind}:${protocol === 'TCP' ? rule.tcp : rule.udp}`;
       const targetAddr = `${rule.target.host}:${protocol === 'TCP' ? rule.target.tcp : rule.target.udp}`;
       const status = result.reachable 
         ? chalk.green('✓ OK')
         : chalk.red('✗ FAILED');
-      const latency = result.reachable && result.latency !== undefined
-        ? chalk.green(`${result.latency}ms`)
-        : chalk.red(result.error || 'N/A');
+      
+      // Show full error message without truncation
+      let latencyDisplay: string;
+      if (result.reachable && result.latency !== undefined) {
+        latencyDisplay = chalk.green(`${result.latency}ms`);
+      } else {
+        // Show full error message
+        const errorMsg = result.error || 'N/A';
+        latencyDisplay = chalk.red(errorMsg);
+        if (!result.reachable) {
+          failedChecks.push({ rule, protocol, result });
+        }
+      }
       
       reachabilityTable.push([
         protocol === 'TCP' ? chalk.blue('TCP') : chalk.magenta('UDP'),
         chalk.white(bindAddr),
         chalk.white(targetAddr),
         status,
-        latency
+        latencyDisplay
       ]);
     }
 
     console.log(reachabilityTable.toString());
     
+    // Show detailed error info for failed TCP connections
+    const failedTcp = failedChecks.filter(c => c.protocol === 'TCP');
+    if (failedTcp.length > 0) {
+      console.log(chalk.yellow('\n⚠ TCP Connection Failed - Troubleshooting:'));
+      for (const { rule } of failedTcp) {
+        console.log(chalk.yellow(`  • ${rule.target.host}:${rule.target.tcp}:`));
+        console.log(chalk.dim(`    - Check if target server is running and listening on port ${rule.target.tcp}`));
+        console.log(chalk.dim(`    - Check firewall settings (sudo ufw status)`));
+        if (rule.target.host.startsWith('100.')) {
+          console.log(chalk.dim(`    - Verify Tailscale connection: tailscale ping ${rule.target.host}`));
+        }
+      }
+    }
+    
     // Check if there are any UDP warnings
     const hasUdpWarnings = results.some(r => r.protocol === 'UDP' && !r.result.reachable);
     if (hasUdpWarnings) {
-      console.log(chalk.yellow('\n⚠ Note: UDP services often don\'t respond to probe packets. Failed UDP checks may still work for actual traffic.'));
+      console.log(chalk.yellow('\n⚠ UDP services often don\'t respond to probe packets. Failed UDP checks may still work for actual traffic.'));
     }
     console.log('');
 
@@ -721,11 +747,12 @@ async function main() {
     for (const rule of cfg.listeners) {
       if (rule.tcp && rule.target.tcp) {
         startTcpProxy(rule, useRestApi);
+        const tcpFailed = failedChecks.some(c => c.rule === rule && c.protocol === 'TCP');
         listenerTable.push([
           chalk.blue('TCP'),
           chalk.cyan(`${rule.bind}:${rule.tcp}`),
           chalk.yellow(`${rule.target.host}:${rule.target.tcp}`),
-          rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
+          tcpFailed ? chalk.red('✗') : (rule.haproxy ? chalk.green('✓') : chalk.gray('✗'))
         ]);
       }
       if (rule.udp && rule.target.udp) {
