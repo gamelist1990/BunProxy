@@ -2,7 +2,19 @@
 
 YAML設定ファイルを使用したBunベースのTCP/UDPフォワーダー。
 
-使用方法:
+## 特徴
+
+- ✅ TCP/UDP プロキシ転送
+- ✅ PROXY Protocol v2 サポート（HAProxy互換）
+- ✅ ホスト名、ローカルIP、Tailscale IPへの転送対応
+- ✅ 起動時のターゲット到達性チェック
+- ✅ リアルタイム接続統計
+- ✅ Discord Webhook 通知
+- ✅ REST API モード（プレイヤー追跡）
+- ✅ 詳細なデバッグログ
+- ✅ カラフルなCLI UI
+
+## 使用方法:
 
 - Bunがインストールされていることを確認してください。
 - 依存関係（TypeScript/Nodeタイプを含む）をインストールし、実行します:
@@ -18,22 +30,42 @@ bun index.ts
 ```yaml
 endpoint: 6000
 useRestApi: false
+savePlayerIP: true
 listeners:
   - bind: 0.0.0.0
     tcp: 25565
     udp: 25565
-    haproxy: false
-    webhook: ""
+    haproxy: true
+    webhook: "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
     target:
-      host: localhost
-      tcp: 5000
-      udp: 6000
+      host: localhost  # または 127.0.0.1、100.94.26.8 (Tailscale)など
+      tcp: 19132
+      udp: 19132
 ```
 
-これは、0.0.0.0:8000でTCPをリッスンし、127.0.0.1:9000にプロキシし、同様にUDP 8001 -> 9001を行います。
+### ターゲットホストの対応
+
+- **ホスト名**: `minecraft.example.com` など（自動的にDNS解決されます）
+- **パブリックIP**: `132.145.123.39` など
+- **ローカルIP**: `127.0.0.1`, `192.168.1.100` など
+- **Tailscale IP**: `100.94.26.8` など
+
+起動時に各ターゲットへの到達性チェックが自動実行されます。
 
 注意: リスナールールで `haproxy: true` を設定することで、HAProxy PROXY Protocol v2を有効にできます。
 有効にすると、プロキシは各TCP接続**および**クライアントセッションごとの最初のUDPパケットに対してPROXY v2ヘッダーを送信します。宛先はPROXY Protocol v2をサポートする必要があります。
+
+## デバッグログ
+
+接続時には詳細なログが表示されます:
+
+```
+[TCP] 127.0.0.1:54321 => 100.94.26.8:25565
+[TCP] ✓ Connected to target 100.94.26.8:25565
+[TCP] Sending PROXY header (56 bytes) to 100.94.26.8:25565
+[TCP] Forwarding initial data (123 bytes)
+[TCP] Connection closed 127.0.0.1:54321 (sent: 456B, recv: 789B)
+```
 
 
 ## Download
