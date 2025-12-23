@@ -130,88 +130,6 @@ function addToDisconnectGroup(webhook: string, targetKey: string, ip: string, po
 }
 
 
-// Check if target host:port is reachable
-async function checkTargetReachability(host: string, port: number, protocol: 'TCP' | 'UDP', timeout = 5000): Promise<{ reachable: boolean; latency?: number; error?: string }> {
-  const startTime = Date.now();
-  
-  if (protocol === 'TCP') {
-    return new Promise((resolve) => {
-      const socket = net.createConnection({ host, port, timeout });
-      
-      socket.on('connect', () => {
-        const latency = Date.now() - startTime;
-        socket.destroy();
-        resolve({ reachable: true, latency });
-      });
-      
-      socket.on('error', (err: any) => {
-        const errorCode = err.code || err.message;
-        let errorMsg = errorCode;
-        if (errorCode === 'ECONNREFUSED') {
-          errorMsg = 'Connection refused (port not open)';
-        } else if (errorCode === 'ETIMEDOUT' || errorCode === 'EHOSTUNREACH') {
-          errorMsg = 'Host unreachable (timeout)';
-        } else if (errorCode === 'ENOTFOUND') {
-          errorMsg = 'Host not found (DNS resolution failed)';
-        } else if (errorCode === 'ENETUNREACH') {
-          errorMsg = 'Network unreachable';
-        }
-        resolve({ reachable: false, error: errorMsg });
-      });
-      
-      socket.on('timeout', () => {
-        socket.destroy();
-        resolve({ reachable: false, error: 'Connection timeout' });
-      });
-    });
-  } else {
-    // UDP check - send a probe packet and wait for response or timeout
-    // Note: Many UDP services don't respond to empty packets, so this may show false negatives
-    return new Promise((resolve) => {
-      const socket = dgram.createSocket('udp4');
-      const timeoutId = setTimeout(() => {
-        socket.close();
-        // UDP timeout is not necessarily a failure - UDP services may not respond to probes
-        resolve({ reachable: false, error: 'No response (normal for UDP)' });
-      }, timeout);
-      
-      socket.on('message', () => {
-        clearTimeout(timeoutId);
-        const latency = Date.now() - startTime;
-        socket.close();
-        resolve({ reachable: true, latency });
-      });
-      
-      socket.on('error', (err: any) => {
-        clearTimeout(timeoutId);
-        socket.close();
-        const errorCode = err.code || err.message;
-        let errorMsg = errorCode;
-        if (errorCode === 'EACCES') {
-          errorMsg = 'Permission denied (firewall?)';
-        } else if (errorCode === 'ENETUNREACH') {
-          errorMsg = 'Network unreachable';
-        }
-        resolve({ reachable: false, error: errorMsg });
-      });
-      
-      // Send empty probe packet
-      socket.send(Buffer.alloc(0), port, host, (err: any) => {
-        if (err) {
-          clearTimeout(timeoutId);
-          socket.close();
-          const errorCode = err.code || err.message;
-          let errorMsg = errorCode;
-          if (errorCode === 'ENETUNREACH') {
-            errorMsg = 'Network unreachable';
-          }
-          resolve({ reachable: false, error: errorMsg });
-        }
-      });
-    });
-  }
-}
-
 function writeDefaultConfig() {
   const defaultConfig = {
     endpoint: 6000,
@@ -702,97 +620,6 @@ async function main() {
     console.log(configTable.toString());
     console.log('');
 
-    // Check target reachability
-    console.log(chalk.bold.yellow('⏳ Checking target reachability...\n'));
-    
-    const reachabilityTable = new Table({
-      head: [
-        chalk.bold.white('Protocol'),
-        chalk.bold.white('Bind'),
-        chalk.bold.white('Target'),
-        chalk.bold.white('Status'),
-        chalk.bold.white('Latency')
-      ],
-      colWidths: [10, 22, 28, 15, 12],
-      style: { head: [], border: ['cyan'] }
-    });
-
-    const checks: Promise<void>[] = [];
-    const results: Array<{ rule: ListenerRule; protocol: 'TCP' | 'UDP'; result: Awaited<ReturnType<typeof checkTargetReachability>> }> = [];
-
-    for (const rule of cfg.listeners) {
-      if (rule.tcp && rule.target.tcp) {
-        checks.push(
-          checkTargetReachability(rule.target.host, rule.target.tcp, 'TCP').then(result => {
-            results.push({ rule, protocol: 'TCP', result });
-          })
-        );
-      }
-      if (rule.udp && rule.target.udp) {
-        checks.push(
-          checkTargetReachability(rule.target.host, rule.target.udp, 'UDP').then(result => {
-            results.push({ rule, protocol: 'UDP', result });
-          })
-        );
-      }
-    }
-
-    await Promise.all(checks);
-
-    // Display reachability results
-    const failedChecks: Array<{ rule: ListenerRule; protocol: 'TCP' | 'UDP'; result: Awaited<ReturnType<typeof checkTargetReachability>> }> = [];
-    
-    for (const { rule, protocol, result } of results) {
-      const bindAddr = `${rule.bind}:${protocol === 'TCP' ? rule.tcp : rule.udp}`;
-      const targetAddr = `${rule.target.host}:${protocol === 'TCP' ? rule.target.tcp : rule.target.udp}`;
-      const status = result.reachable 
-        ? chalk.green('✓ OK')
-        : chalk.red('✗ FAILED');
-      
-      // Show full error message without truncation
-      let latencyDisplay: string;
-      if (result.reachable && result.latency !== undefined) {
-        latencyDisplay = chalk.green(`${result.latency}ms`);
-      } else {
-        // Show full error message
-        const errorMsg = result.error || 'N/A';
-        latencyDisplay = chalk.red(errorMsg);
-        if (!result.reachable) {
-          failedChecks.push({ rule, protocol, result });
-        }
-      }
-      
-      reachabilityTable.push([
-        protocol === 'TCP' ? chalk.blue('TCP') : chalk.magenta('UDP'),
-        chalk.white(bindAddr),
-        chalk.white(targetAddr),
-        status,
-        latencyDisplay
-      ]);
-    }
-
-    console.log(reachabilityTable.toString());
-    
-    // Show detailed error info for failed TCP connections
-    const failedTcp = failedChecks.filter(c => c.protocol === 'TCP');
-    if (failedTcp.length > 0) {
-      console.log(chalk.yellow('\n⚠ TCP Connection Failed - Troubleshooting:'));
-      for (const { rule } of failedTcp) {
-        console.log(chalk.yellow(`  • ${rule.target.host}:${rule.target.tcp}:`));
-        console.log(chalk.dim(`    - Check if target server is running and listening on port ${rule.target.tcp}`));
-        console.log(chalk.dim(`    - Check firewall settings (sudo ufw status)`));
-        if (rule.target.host.startsWith('100.')) {
-          console.log(chalk.dim(`    - Verify Tailscale connection: tailscale ping ${rule.target.host}`));
-        }
-      }
-    }
-    
-    // Check if there are any UDP warnings
-    const hasUdpWarnings = results.some(r => r.protocol === 'UDP' && !r.result.reachable);
-    if (hasUdpWarnings) {
-      console.log(chalk.yellow('\n⚠ UDP services often don\'t respond to probe packets. Failed UDP checks may still work for actual traffic.'));
-    }
-    console.log('');
 
     // Start services
     if (useRestApi) {
@@ -822,12 +649,11 @@ async function main() {
     for (const rule of cfg.listeners) {
       if (rule.tcp && rule.target.tcp) {
         startTcpProxy(rule, useRestApi);
-        const tcpFailed = failedChecks.some(c => c.rule === rule && c.protocol === 'TCP');
         listenerTable.push([
           chalk.blue('TCP'),
           chalk.cyan(`${rule.bind}:${rule.tcp}`),
           chalk.yellow(`${rule.target.host}:${rule.target.tcp}`),
-          tcpFailed ? chalk.red('✗') : (rule.haproxy ? chalk.green('✓') : chalk.gray('✗'))
+          rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
       if (rule.udp && rule.target.udp) {
