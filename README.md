@@ -105,6 +105,7 @@ curl -X POST http://localhost:6000/api/logout \
 
 
 
+
 # Bedrock Dedicated Server Dll
 
 Bun Proxy は Bedrock Dedicated Server 用の Dll を提供しています。これにより、サーバーが起動したときに自動的にプレイヤーのログイン/ログアウトを Bun Proxy に通知できます。
