@@ -53,7 +53,7 @@ jobs:
           fi
           echo "VERSION=$version" >> $GITHUB_OUTPUT
 
-      - name: Build Bun binaries for Linux/Windows/Mac
+      - name: Build Bun binaries for Linux/Windows/Mac/Arm
         id: bun_build
         run: |
           set -euo pipefail
@@ -63,14 +63,17 @@ jobs:
           # Define flags with quoted strings per the request
           DEFINE_BUILD_VERSION='"'"${version}"'"'
           DEFINE_BUILD_TIME='"'"${build_time}"'"'
-          # Linux
-          bun build --compile --target=bun-linux-x64 ./index.ts --outfile build/BunProxy-${version}-linux --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          # Linux x64
+          bun build --compile --target=bun-linux-x64 ./index.ts --outfile build/BunProxy-${version}-linux-x64 --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
+          # Linux Arm64
+          bun build --compile --target=bun-linux-arm64 ./index.ts --outfile build/BunProxy-${version}-linux-arm64 --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # Windows (exe extension)
           bun build --compile --target=bun-windows-x64 ./index.ts --outfile build/BunProxy-${version}-windows.exe --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # MacOS Arm
           bun build --compile --target=bun-darwin-arm64 ./index.ts --outfile build/BunProxy-${version}-darwin-arm64 --define BUILD_VERSION="\"${version}\"" --define BUILD_TIME="\"${build_time}\""
           # Expose outputs
-          echo "BINARY_LINUX=build/BunProxy-${version}-linux" >> $GITHUB_OUTPUT
+          echo "BINARY_LINUX_X64=build/BunProxy-${version}-linux-x64" >> $GITHUB_OUTPUT
+          echo "BINARY_LINUX_ARM64=build/BunProxy-${version}-linux-arm64" >> $GITHUB_OUTPUT
           echo "BINARY_WINDOWS=build/BunProxy-${version}-windows.exe" >> $GITHUB_OUTPUT
           echo "BINARY_MAC=build/BunProxy-${version}-darwin-arm64" >> $GITHUB_OUTPUT
       - name: Prepare release metadata (date, tag)
@@ -158,7 +161,8 @@ jobs:
             README: https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/README.md
 
             Download once uploaded:
-            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux
+            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux-x64
+            - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux-arm64
             - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-windows.exe
             - https://github.com/${{ github.repository }}/releases/download/${{ steps.release_meta.outputs.TAG_NAME }}/BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-darwin-arm64
           draft: false
@@ -166,12 +170,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload release asset (linux binary)
+      - name: Upload release asset (linux x64 binary)
         uses: actions/upload-release-asset@v1
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ steps.bun_build.outputs.BINARY_LINUX }}
-          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux
+          asset_path: ${{ steps.bun_build.outputs.BINARY_LINUX_X64 }}
+          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux-x64
+          asset_content_type: application/octet-stream
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload release asset (linux arm64 binary)
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ${{ steps.bun_build.outputs.BINARY_LINUX_ARM64 }}
+          asset_name: BunProxy-${{ steps.release_meta.outputs.RELEASE_VERSION }}-linux-arm64
           asset_content_type: application/octet-stream
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
