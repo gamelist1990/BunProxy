@@ -420,6 +420,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 // UDP proxy
 function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
   if (!rule.udp || !rule.target.udp) return;
+  const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
   const server = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
@@ -444,6 +445,36 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     return `${address}:${port}`;
   }
 
+  function refreshSessionTimer(key: string, session: Session) {
+    if (session.timer) {
+      clearTimeout(session.timer);
+    }
+
+    session.timer = setTimeout(() => {
+      if (rule.webhook && rule.webhook.trim() !== '') {
+        if (session.playerName) {
+          void sendDiscordWebhookEmbed(
+            rule.webhook,
+            createPlayerLeaveEmbed(
+              session.playerName,
+              session.clientAddress,
+              session.clientPort,
+              'UDP'
+            )
+          );
+        } else if (!useRestApi) {
+          // Non-REST API mode: aggregate disconnect notifications
+          addToDisconnectGroup(rule.webhook, `${rule.target.host}:${rule.target.udp}`, session.clientAddress, session.clientPort, 'UDP');
+        }
+      }
+
+      session.destSocket.close();
+      sessions.delete(key);
+      connectionStats.udp.active--;
+      console.log(chalk.dim(`[UDP] Session timeout ${session.clientAddress}:${session.clientPort} (idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms)`));
+    }, UDP_SESSION_IDLE_TIMEOUT_MS);
+  }
+
   server.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
     const key = sessionKey(rinfo.address, rinfo.port);
     let session = sessions.get(key);
@@ -454,12 +485,24 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
       
       const destSocket = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
       destSocket.on('message', (response: Buffer, destInfo: dgram.RemoteInfo) => {
+        const activeSession = sessions.get(key);
+        if (activeSession) {
+          // 返信トラフィックでもアイドルタイマーを更新
+          refreshSessionTimer(key, activeSession);
+        }
         server.send(response, rinfo.port, rinfo.address, (err: Error | null) => {
           if (err) console.error('[UDP] Error sending back to client', err.message);
         });
       });
       destSocket.on('error', (err: Error) => {
         console.error('[UDP] Dest socket error', err.message);
+        const activeSession = sessions.get(key);
+        if (activeSession) {
+          if (activeSession.timer) clearTimeout(activeSession.timer);
+          activeSession.destSocket.close();
+          sessions.delete(key);
+          connectionStats.udp.active--;
+        }
       });
       destSocket.bind(() => {
         // None
@@ -490,57 +533,10 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           session!.destHostResolved = rule.target.host;
         }
       })();
-
-      const CLEANUP_MS = 60_000; // 60s
-      session.timer = setTimeout(() => {
-        if (rule.webhook && rule.webhook.trim() !== '') {
-          if (session?.playerName) {
-            void sendDiscordWebhookEmbed(
-              rule.webhook,
-              createPlayerLeaveEmbed(
-                session.playerName,
-                session.clientAddress,
-                session.clientPort,
-                'UDP'
-              )
-            );
-          } else {
-            if (!useRestApi) {
-              // Non-REST API mode: aggregate disconnect notifications
-              addToDisconnectGroup(rule.webhook, `${rule.target.host}:${rule.target.udp}`, session!.clientAddress, session!.clientPort, 'UDP');
-            }
-          }
-        }
-        destSocket.close();
-        sessions.delete(key);
-        connectionStats.udp.active--;
-      }, CLEANUP_MS);
-    } else {
-      if (session.timer) clearTimeout(session.timer as any);
-      session.timer = setTimeout(() => {
-        if (rule.webhook && rule.webhook.trim() !== '') {
-          if (session?.playerName) {
-            void sendDiscordWebhookEmbed(
-              rule.webhook,
-              createPlayerLeaveEmbed(
-                session.playerName,
-                session.clientAddress,
-                session.clientPort,
-                'UDP'
-              )
-            );
-          } else {
-            if (!useRestApi) {
-              // Non-REST API mode: aggregate disconnect notifications
-              addToDisconnectGroup(rule.webhook, `${rule.target.host}:${rule.target.udp}`, session!.clientAddress, session!.clientPort, 'UDP');
-            }
-          }
-        }
-        session?.destSocket.close();
-        sessions.delete(key);
-        connectionStats.udp.active--;
-      }, 60_000);
     }
+
+    // クライアントからの受信トラフィックでアイドルタイマー更新
+    refreshSessionTimer(key, session);
 
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
