@@ -167,6 +167,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
   if (!rule.tcp || !rule.target.tcp) {
     return;
   }
+  const CONNECT_TIMEOUT_MS = 10_000;
+  const INITIAL_CLIENT_DATA_TIMEOUT_MS = 30_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const server = net.createServer((clientSocket: net.Socket) => {
     connectionStats.tcp.total++;
@@ -186,8 +188,12 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${targetStr}`));
     
-    // タイムアウト設定
-    clientSocket.setTimeout(30000); // 30秒のタイムアウト
+    // 初回データ受信までのタイムアウト（接続後のアイドル切断には使わない）
+    const initialDataTimer = setTimeout(() => {
+      if (isClosed) return;
+      console.error(chalk.red(`[TCP] ✗ No initial data within ${INITIAL_CLIENT_DATA_TIMEOUT_MS}ms from ${clientAddr}`));
+      cleanup();
+    }, INITIAL_CLIENT_DATA_TIMEOUT_MS);
     
     let firstChunk: Buffer | null = null;
     let destConnected = false;
@@ -215,6 +221,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     // 最初のデータを待つ
     clientSocket.once('data', async (buf) => {
+      clearTimeout(initialDataTimer);
       firstChunk = buf;
       
       let proxyIP = originalIP;
@@ -245,12 +252,23 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       // 宛先への接続
       destSocket = net.createConnection({
         host: rule.target.host,
-        port: rule.target.tcp!,
-        timeout: 10000 // 10秒のタイムアウト
+        port: rule.target.tcp!
       });
+      // KeepAlive を有効化して中間経路での切断を減らす
+      destSocket.setKeepAlive(true, 30_000);
+      clientSocket.setKeepAlive(true, 30_000);
+
+      const connectTimer = setTimeout(() => {
+        if (isClosed || destConnected) return;
+        console.error(chalk.red(`[TCP] ✗ Destination connect timeout ${targetStr}`));
+        cleanup();
+      }, CONNECT_TIMEOUT_MS);
 
       destSocket.on('connect', async () => {
+        clearTimeout(connectTimer);
         destConnected = true;
+        // 接続確立後はアイドルタイムアウトで切断しない
+        destSocket!.setTimeout(0);
         console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
         
         try {
@@ -343,6 +361,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       };
 
       destSocket.on('error', (err: Error) => {
+        clearTimeout(connectTimer);
         console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
         if (err.message.includes('ECONNREFUSED')) {
           console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${targetStr}?`));
@@ -355,11 +374,13 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       });
 
       destSocket.on('timeout', () => {
+        clearTimeout(connectTimer);
         console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${targetStr}`));
         cleanup();
       });
 
       destSocket.on('close', () => {
+        clearTimeout(connectTimer);
         if (!isClosed) {
           console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
           cleanup();
@@ -368,16 +389,19 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     });
 
     clientSocket.on('error', (err: Error) => {
+      clearTimeout(initialDataTimer);
       console.error(chalk.red('[TCP] Client socket error:'), err.message);
       cleanup();
     });
 
     clientSocket.on('timeout', () => {
+      clearTimeout(initialDataTimer);
       console.error(chalk.red('[TCP] Client socket timeout'));
       cleanup();
     });
     
     clientSocket.on('close', () => {
+      clearTimeout(initialDataTimer);
       if (!isClosed) {
         cleanup();
       }
