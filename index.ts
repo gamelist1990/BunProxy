@@ -150,21 +150,72 @@ function writeDefaultConfig() {
   console.log('Created default config.yml');
 }
 
+function normalizePort(value: unknown, fieldName: string): number | undefined {
+  if (value === undefined || value === null || value === '') {
+    return undefined;
+  }
+
+  let parsed: number;
+  if (typeof value === 'number') {
+    parsed = value;
+  } else if (typeof value === 'string' && /^\d+$/.test(value.trim())) {
+    parsed = Number(value.trim());
+  } else {
+    throw new Error(`${fieldName} must be an integer port in range 1-65535`);
+  }
+
+  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+    throw new Error(`${fieldName} must be an integer port in range 1-65535`);
+  }
+
+  return parsed;
+}
+
 function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
   if (!fs.existsSync(CONFIG_FILE)) {
     writeDefaultConfig();
   }
   const text = fs.readFileSync(CONFIG_FILE, { encoding: 'utf-8' });
-  const cfg = YAML.parse(text);
+  const cfg = YAML.parse(text) as any;
   if (!cfg.listeners || !Array.isArray(cfg.listeners)) {
     throw new Error('config.yml must include a listeners array');
   }
+
+  cfg.endpoint = normalizePort(cfg.endpoint, 'endpoint') ?? 6000;
+
+  cfg.listeners = cfg.listeners.map((rule: any, index: number) => {
+    if (!rule || typeof rule !== 'object') {
+      throw new Error(`listeners[${index}] must be an object`);
+    }
+
+    if (!rule.target || typeof rule.target !== 'object') {
+      throw new Error(`listeners[${index}].target must be an object`);
+    }
+
+    if (typeof rule.target.host !== 'string' || rule.target.host.trim() === '') {
+      throw new Error(`listeners[${index}].target.host must be a non-empty string`);
+    }
+
+    return {
+      ...rule,
+      bind: typeof rule.bind === 'string' && rule.bind.trim() !== '' ? rule.bind : '0.0.0.0',
+      tcp: normalizePort(rule.tcp, `listeners[${index}].tcp`),
+      udp: normalizePort(rule.udp, `listeners[${index}].udp`),
+      target: {
+        ...rule.target,
+        host: rule.target.host.trim(),
+        tcp: normalizePort(rule.target.tcp, `listeners[${index}].target.tcp`),
+        udp: normalizePort(rule.target.udp, `listeners[${index}].target.udp`),
+      },
+    } as ListenerRule;
+  });
+
   return cfg as { endpoint?: number; listeners: ListenerRule[] };
 }
 
 // TCP proxy
 function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
-  if (!rule.tcp || !rule.target.tcp) {
+  if (rule.tcp === undefined || rule.target.tcp === undefined) {
     return;
   }
   const CONNECT_TIMEOUT_MS = 10_000;
@@ -410,6 +461,12 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
   server.on('error', (err: Error) => {
     console.error(chalk.red('[TCP] Server error:'), err.message);
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EACCES') {
+      console.error(chalk.red(`[TCP]   → Permission denied on ${bindAddr}:${rule.tcp}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
+    } else if (code === 'EADDRINUSE') {
+      console.error(chalk.red(`[TCP]   → ${bindAddr}:${rule.tcp} is already in use by another process.`));
+    }
   });
 
   server.listen(rule.tcp, bindAddr, () => {
@@ -419,7 +476,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
 // UDP proxy
 function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
-  if (!rule.udp || !rule.target.udp) return;
+  if (rule.udp === undefined || rule.target.udp === undefined) return;
   const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
@@ -598,6 +655,12 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
   server.on('error', (err: Error) => {
     console.error('[UDP] Server error', err.message);
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EACCES') {
+      console.error(chalk.red(`[UDP]   → Permission denied on ${bindAddr}:${rule.udp}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
+    } else if (code === 'EADDRINUSE') {
+      console.error(chalk.red(`[UDP]   → ${bindAddr}:${rule.udp} is already in use by another process.`));
+    }
   });
 
   server.bind(rule.udp, bindAddr);
@@ -667,7 +730,7 @@ async function main() {
     });
 
     for (const rule of cfg.listeners) {
-      if (rule.tcp && rule.target.tcp) {
+      if (rule.tcp !== undefined && rule.target.tcp !== undefined) {
         startTcpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.blue('TCP'),
@@ -676,7 +739,7 @@ async function main() {
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
-      if (rule.udp && rule.target.udp) {
+      if (rule.udp !== undefined && rule.target.udp !== undefined) {
         startUdpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.magenta('UDP'),
