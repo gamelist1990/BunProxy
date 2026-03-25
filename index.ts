@@ -761,8 +761,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           }
         }
 
-        if (!session!.hasReceivedResponse && targetIndex + 1 < udpTargets.length) {
-          clearInitialResponseTimer(session!);
+        if (!session!.hasReceivedResponse && !session!.responseTimer && targetIndex + 1 < udpTargets.length) {
           session!.responseTimer = setTimeout(async () => {
             const activeSession = sessions.get(key);
             if (!activeSession || activeSession.hasReceivedResponse) {
