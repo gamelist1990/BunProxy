@@ -541,6 +541,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
   const udpTargets = getTargetsForProtocol(rule, 'udp');
   if (rule.udp === undefined || udpTargets.length === 0) return;
   const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
+  const UDP_INITIAL_RESPONSE_TIMEOUT_MS = 3_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
   const server = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
@@ -555,6 +556,11 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     logged?: boolean;
     destHostResolved?: string;
     activeTargetIndex: number;
+    hasReceivedResponse: boolean;
+    responseTimer?: ReturnType<typeof setTimeout>;
+    pendingPayload?: Buffer;
+    originalIP?: string;
+    originalPort?: number;
     timer?: ReturnType<typeof setTimeout>;
   };
 
@@ -572,6 +578,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     }
 
     session.timer = setTimeout(() => {
+      clearInitialResponseTimer(session);
       if (rule.webhook && rule.webhook.trim() !== '') {
         if (session.playerName) {
           void sendDiscordWebhookEmbed(
@@ -597,6 +604,13 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     }, UDP_SESSION_IDLE_TIMEOUT_MS);
   }
 
+  function clearInitialResponseTimer(session: Session) {
+    if (session.responseTimer) {
+      clearTimeout(session.responseTimer);
+      session.responseTimer = undefined;
+    }
+  }
+
   server.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
     const key = sessionKey(rinfo.address, rinfo.port);
     let session = sessions.get(key);
@@ -609,6 +623,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
       destSocket.on('message', (response: Buffer, destInfo: dgram.RemoteInfo) => {
         const activeSession = sessions.get(key);
         if (activeSession) {
+          activeSession.hasReceivedResponse = true;
+          clearInitialResponseTimer(activeSession);
           // 返信トラフィックでもアイドルタイマーを更新
           refreshSessionTimer(key, activeSession);
         }
@@ -621,6 +637,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         const activeSession = sessions.get(key);
         if (activeSession) {
           if (activeSession.timer) clearTimeout(activeSession.timer);
+          clearInitialResponseTimer(activeSession);
           activeSession.destSocket.close();
           sessions.delete(key);
           connectionStats.udp.active--;
@@ -640,6 +657,11 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         logged: false,
         destHostResolved: undefined,
         activeTargetIndex: 0,
+        hasReceivedResponse: false,
+        responseTimer: undefined,
+        pendingPayload: undefined,
+        originalIP: undefined,
+        originalPort: undefined,
       };
       sessions.set(key, session);
 
@@ -681,6 +703,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
     }
 
+    session.originalIP = originalIP;
+    session.originalPort = originalPort;
 
     const trySendUdp = async (targetIndex: number) => {
       const target = udpTargets[targetIndex];
@@ -703,6 +727,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
         }
       }
+
+      session!.pendingPayload = payload;
 
       session!.destSocket.send(payload, target.udp!, target.host, async (err: Error | null) => {
         if (err) {
@@ -733,6 +759,31 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           } else {
             addToConnectGroup(rule.webhook, targetKey, originalIP, originalPort, 'UDP');
           }
+        }
+
+        if (!session!.hasReceivedResponse && targetIndex + 1 < udpTargets.length) {
+          clearInitialResponseTimer(session!);
+          session!.responseTimer = setTimeout(async () => {
+            const activeSession = sessions.get(key);
+            if (!activeSession || activeSession.hasReceivedResponse) {
+              return;
+            }
+
+            const currentTarget = udpTargets[activeSession.activeTargetIndex] ?? udpTargets[0];
+            console.warn(chalk.yellow(
+              `[UDP] No response within ${UDP_INITIAL_RESPONSE_TIMEOUT_MS}ms from ${currentTarget.host}:${currentTarget.udp}; trying next target`
+            ));
+
+            activeSession.headerSent = false;
+            activeSession.logged = false;
+            activeSession.notified = false;
+            activeSession.destHostResolved = undefined;
+            clearInitialResponseTimer(activeSession);
+
+            if (activeSession.activeTargetIndex + 1 < udpTargets.length) {
+              await trySendUdp(activeSession.activeTargetIndex + 1);
+            }
+          }, UDP_INITIAL_RESPONSE_TIMEOUT_MS);
         }
       });
     };
