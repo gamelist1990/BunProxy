@@ -37,11 +37,16 @@ listeners:
     udp: 25565
     haproxy: true
     webhook: "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
-    target:
-      host: localhost  # または 127.0.0.1、100.94.26.8 (Tailscale)など
-      tcp: 19132
-      udp: 19132
+    targets:
+      - host: localhost  # 1つ目を優先。失敗したら次へ切り替え
+        tcp: 19132
+        udp: 19132
+      - host: 192.168.1.20
+        tcp: 19132
+        udp: 19132
 ```
+
+従来どおり `target:` 1件だけの設定も引き続き使用できます。
 
 ### ターゲットホストの対応
 

@@ -28,6 +28,11 @@ type ListenerRule = {
     tcp?: number;
     udp?: number;
   };
+  targets?: Array<{
+    host: string;
+    tcp?: number;
+    udp?: number;
+  }>;
 };
 
 const CONFIG_FILE = path.join(process.cwd(), 'config.yml');
@@ -171,6 +176,33 @@ function normalizePort(value: unknown, fieldName: string): number | undefined {
   return parsed;
 }
 
+function normalizeTarget(target: any, fieldName: string) {
+  if (!target || typeof target !== 'object') {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  if (typeof target.host !== 'string' || target.host.trim() === '') {
+    throw new Error(`${fieldName}.host must be a non-empty string`);
+  }
+
+  return {
+    ...target,
+    host: target.host.trim(),
+    tcp: normalizePort(target.tcp, `${fieldName}.tcp`),
+    udp: normalizePort(target.udp, `${fieldName}.udp`),
+  };
+}
+
+function getTargetsForProtocol(rule: ListenerRule, protocol: 'tcp' | 'udp') {
+  const baseTargets = Array.isArray(rule.targets) && rule.targets.length > 0
+    ? rule.targets
+    : rule.target
+      ? [rule.target]
+      : [];
+
+  return baseTargets.filter((target) => target[protocol] !== undefined);
+}
+
 function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
   if (!fs.existsSync(CONFIG_FILE)) {
     writeDefaultConfig();
@@ -188,12 +220,15 @@ function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
       throw new Error(`listeners[${index}] must be an object`);
     }
 
-    if (!rule.target || typeof rule.target !== 'object') {
-      throw new Error(`listeners[${index}].target must be an object`);
-    }
+    const normalizedTargets = Array.isArray(rule.targets)
+      ? rule.targets.map((target: any, targetIndex: number) =>
+          normalizeTarget(target, `listeners[${index}].targets[${targetIndex}]`))
+      : rule.target
+        ? [normalizeTarget(rule.target, `listeners[${index}].target`)]
+        : [];
 
-    if (typeof rule.target.host !== 'string' || rule.target.host.trim() === '') {
-      throw new Error(`listeners[${index}].target.host must be a non-empty string`);
+    if (normalizedTargets.length === 0) {
+      throw new Error(`listeners[${index}] must define target or targets`);
     }
 
     return {
@@ -201,12 +236,8 @@ function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
       bind: typeof rule.bind === 'string' && rule.bind.trim() !== '' ? rule.bind : '0.0.0.0',
       tcp: normalizePort(rule.tcp, `listeners[${index}].tcp`),
       udp: normalizePort(rule.udp, `listeners[${index}].udp`),
-      target: {
-        ...rule.target,
-        host: rule.target.host.trim(),
-        tcp: normalizePort(rule.target.tcp, `listeners[${index}].target.tcp`),
-        udp: normalizePort(rule.target.udp, `listeners[${index}].target.udp`),
-      },
+      target: normalizedTargets[0],
+      targets: normalizedTargets,
     } as ListenerRule;
   });
 
@@ -215,7 +246,8 @@ function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
 
 // TCP proxy
 function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
-  if (rule.tcp === undefined || rule.target.tcp === undefined) {
+  const tcpTargets = getTargetsForProtocol(rule, 'tcp');
+  if (rule.tcp === undefined || tcpTargets.length === 0) {
     return;
   }
   const CONNECT_TIMEOUT_MS = 10_000;
@@ -231,13 +263,14 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     const originalIP = clientSocket.remoteAddress || '0.0.0.0';
     const originalPort = clientSocket.remotePort || 0;
-    const targetStr = `${rule.target.host}:${rule.target.tcp}`;
+    let activeTarget = tcpTargets[0];
+    let targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
     
     let clientToServerBytes = 0;
     let serverToClientBytes = 0;
     let isClosed = false;
 
-    console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${targetStr}`));
+    console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')}`));
     
     // 初回データ受信までのタイムアウト（接続後のアイドル切断には使わない）
     const initialDataTimer = setTimeout(() => {
@@ -298,103 +331,6 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         }
       }
 
-      console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr}`));
-
-      // 宛先への接続
-      destSocket = net.createConnection({
-        host: rule.target.host,
-        port: rule.target.tcp!
-      });
-      // KeepAlive を有効化して中間経路での切断を減らす
-      destSocket.setKeepAlive(true, 30_000);
-      clientSocket.setKeepAlive(true, 30_000);
-
-      const connectTimer = setTimeout(() => {
-        if (isClosed || destConnected) return;
-        console.error(chalk.red(`[TCP] ✗ Destination connect timeout ${targetStr}`));
-        cleanup();
-      }, CONNECT_TIMEOUT_MS);
-
-      destSocket.on('connect', async () => {
-        clearTimeout(connectTimer);
-        destConnected = true;
-        // 接続確立後はアイドルタイムアウトで切断しない
-        destSocket!.setTimeout(0);
-        console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
-        
-        try {
-          if (rule.haproxy) {
-            // HAProxy PROXY Protocolヘッダーを送信
-            const destPort = rule.target.tcp || 0;
-            let destIP = rule.target.host;
-            
-            // ホスト名をIPアドレスに解決
-            try {
-              if (net.isIP(destIP) === 0) {
-                const addr = await dns.promises.lookup(destIP);
-                destIP = addr.address;
-                console.log(chalk.dim(`[TCP] Resolved ${rule.target.host} to ${destIP}`));
-              }
-            } catch (err) {
-              console.warn(chalk.yellow('[TCP] Failed to resolve destination host, using original host'), err instanceof Error ? err.message : String(err));
-            }
-            
-            const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
-            console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
-            
-            destSocket!.write(header, (err) => {
-              if (err) {
-                console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
-                cleanup();
-                return;
-              }
-              
-              // 最初のデータを送信
-              if (firstChunk) {
-                console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
-                destSocket!.write(firstChunk, (err) => {
-                  if (err) {
-                    console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
-                    cleanup();
-                    return;
-                  }
-                  setupPiping();
-                });
-              } else {
-                setupPiping();
-              }
-            });
-          } else {
-            // HAProxyなしの場合
-            if (firstChunk) {
-              destSocket!.write(firstChunk, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
-                  cleanup();
-                  return;
-                }
-                setupPiping();
-              });
-            } else {
-              setupPiping();
-            }
-          }
-
-          // Webhookの送信
-          if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
-            webhookSentForConn = true;
-            if (useRestApi) {
-              connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {});
-            } else {
-              addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
-            }
-          }
-        } catch (err) {
-          console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
-          cleanup();
-        }
-      });
-
       const setupPiping = () => {
         // データのパイプ設定
         clientSocket.on('data', (chunk) => {
@@ -411,32 +347,158 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
       };
 
-      destSocket.on('error', (err: Error) => {
-        clearTimeout(connectTimer);
-        console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
-        if (err.message.includes('ECONNREFUSED')) {
-          console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${targetStr}?`));
-        } else if (err.message.includes('ETIMEDOUT')) {
-          console.error(chalk.red(`[TCP]   → Connection timed out. Check network connectivity.`));
-        } else if (err.message.includes('EHOSTUNREACH')) {
-          console.error(chalk.red(`[TCP]   → Host unreachable. Check firewall and routing.`));
-        }
-        cleanup();
-      });
-
-      destSocket.on('timeout', () => {
-        clearTimeout(connectTimer);
-        console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${targetStr}`));
-        cleanup();
-      });
-
-      destSocket.on('close', () => {
-        clearTimeout(connectTimer);
-        if (!isClosed) {
-          console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
+      const connectToTargets = (targetIndex: number) => {
+        if (isClosed) return;
+        if (targetIndex >= tcpTargets.length) {
+          console.error(chalk.red(`[TCP] ✗ All targets failed for ${clientAddr}`));
           cleanup();
+          return;
         }
-      });
+
+        activeTarget = tcpTargets[targetIndex];
+        targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
+        console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr} (${targetIndex + 1}/${tcpTargets.length})`));
+
+        const currentSocket = net.createConnection({
+          host: activeTarget.host,
+          port: activeTarget.tcp!
+        });
+        destSocket = currentSocket;
+        currentSocket.setKeepAlive(true, 30_000);
+        clientSocket.setKeepAlive(true, 30_000);
+
+        let settled = false;
+        const moveToNextTarget = (reason: string, err?: Error) => {
+          if (settled || isClosed || destConnected) return;
+          settled = true;
+          clearTimeout(connectTimer);
+          console.error(chalk.red(`[TCP] ✗ ${reason} ${targetStr}${err ? `: ${err.message}` : ''}`));
+          if (err?.message.includes('ECONNREFUSED')) {
+            console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${targetStr}?`));
+          } else if (err?.message.includes('ETIMEDOUT')) {
+            console.error(chalk.red(`[TCP]   → Connection timed out. Check network connectivity.`));
+          } else if (err?.message.includes('EHOSTUNREACH') || err?.message.includes('ENETUNREACH')) {
+            console.error(chalk.red(`[TCP]   → Host unreachable. Check firewall and routing.`));
+          }
+          currentSocket.destroy();
+          if (targetIndex + 1 < tcpTargets.length) {
+            console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+            connectToTargets(targetIndex + 1);
+          } else {
+            cleanup();
+          }
+        };
+
+        const connectTimer = setTimeout(() => {
+          moveToNextTarget('Destination connect timeout');
+        }, CONNECT_TIMEOUT_MS);
+
+        currentSocket.on('connect', async () => {
+          if (settled || isClosed) return;
+          settled = true;
+          clearTimeout(connectTimer);
+          destConnected = true;
+          currentSocket.setTimeout(0);
+          console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
+
+          try {
+            if (rule.haproxy) {
+              const destPort = activeTarget.tcp || 0;
+              let destIP = activeTarget.host;
+
+              try {
+                if (net.isIP(destIP) === 0) {
+                  const addr = await dns.promises.lookup(destIP);
+                  destIP = addr.address;
+                  console.log(chalk.dim(`[TCP] Resolved ${activeTarget.host} to ${destIP}`));
+                }
+              } catch (err) {
+                console.warn(chalk.yellow('[TCP] Failed to resolve destination host, using original host'), err instanceof Error ? err.message : String(err));
+              }
+
+              const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
+              console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
+
+              currentSocket.write(header, (err) => {
+                if (err) {
+                  console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
+                  cleanup();
+                  return;
+                }
+
+                if (firstChunk) {
+                  console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+                  currentSocket.write(firstChunk, (err) => {
+                    if (err) {
+                      console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                      cleanup();
+                      return;
+                    }
+                    setupPiping();
+                  });
+                } else {
+                  setupPiping();
+                }
+              });
+            } else if (firstChunk) {
+              currentSocket.write(firstChunk, (err) => {
+                if (err) {
+                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                  cleanup();
+                  return;
+                }
+                setupPiping();
+              });
+            } else {
+              setupPiping();
+            }
+
+            if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
+              webhookSentForConn = true;
+              if (useRestApi) {
+                connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {});
+              } else {
+                addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
+              }
+            }
+          } catch (err) {
+            console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
+            cleanup();
+          }
+        });
+
+        currentSocket.on('error', (err: Error) => {
+          if (!settled && !destConnected) {
+            moveToNextTarget('Destination socket error', err);
+            return;
+          }
+          console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
+          cleanup();
+        });
+
+        currentSocket.on('timeout', () => {
+          if (!settled && !destConnected) {
+            moveToNextTarget('Destination socket timeout');
+            return;
+          }
+          console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${targetStr}`));
+          cleanup();
+        });
+
+        currentSocket.on('close', () => {
+          clearTimeout(connectTimer);
+          if (!settled && !destConnected) {
+            moveToNextTarget('Destination socket closed before connect');
+            return;
+          }
+          if (!isClosed) {
+            console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
+            cleanup();
+          }
+        });
+      };
+
+      connectToTargets(0);
     });
 
     clientSocket.on('error', (err: Error) => {
@@ -476,7 +538,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
 // UDP proxy
 function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
-  if (rule.udp === undefined || rule.target.udp === undefined) return;
+  const udpTargets = getTargetsForProtocol(rule, 'udp');
+  if (rule.udp === undefined || udpTargets.length === 0) return;
   const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
@@ -491,6 +554,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     notified?: boolean;
     logged?: boolean;
     destHostResolved?: string;
+    activeTargetIndex: number;
     timer?: ReturnType<typeof setTimeout>;
   };
 
@@ -521,7 +585,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           );
         } else if (!useRestApi) {
           // Non-REST API mode: aggregate disconnect notifications
-          addToDisconnectGroup(rule.webhook, `${rule.target.host}:${rule.target.udp}`, session.clientAddress, session.clientPort, 'UDP');
+          const disconnectTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
+          addToDisconnectGroup(rule.webhook, `${disconnectTarget.host}:${disconnectTarget.udp}`, session.clientAddress, session.clientPort, 'UDP');
         }
       }
 
@@ -574,22 +639,26 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         notified: false,
         logged: false,
         destHostResolved: undefined,
+        activeTargetIndex: 0,
       };
       sessions.set(key, session);
 
-      // Resolve target host to numeric IP for PROXY header (supports hostnames and local IPs like Tailscale)
-      (async () => {
+      const resolveSessionTarget = async (targetIndex: number) => {
+        const target = udpTargets[targetIndex] ?? udpTargets[0];
         try {
-          let resolved = rule.target.host;
+          let resolved = target.host;
           if (net.isIP(resolved) === 0) {
-            const addr = await dns.promises.lookup(rule.target.host);
+            const addr = await dns.promises.lookup(target.host);
             resolved = addr.address;
           }
           session!.destHostResolved = resolved;
-        } catch (err) {
-          session!.destHostResolved = rule.target.host;
+        } catch {
+          session!.destHostResolved = target.host;
         }
-      })();
+      };
+
+      // Resolve target host to numeric IP for PROXY header (supports hostnames and local IPs like Tailscale)
+      void resolveSessionTarget(0);
     }
 
     // クライアントからの受信トラフィックでアイドルタイマー更新
@@ -598,6 +667,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
     let actualPayload = msg;
+    const activeTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
     try {
       const chain = parseProxyV2Chain(msg);
       if (chain.headers.length > 0) {
@@ -605,48 +675,69 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
         actualPayload = chain.payload;
-        console.log(`[UDP] ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.udp} (payload=${actualPayload.length})`);
+        console.log(`[UDP] ${originalIP}:${originalPort} => ${activeTarget.host}:${activeTarget.udp} (payload=${actualPayload.length})`);
       }
     } catch (err) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
     }
 
 
-    let payload = actualPayload;
-    if (rule.haproxy && !session.headerSent) {
-      try {
-        const header = generateProxyProtocolV2Header(originalIP, originalPort, session.destHostResolved ?? rule.target.host, rule.target.udp!, true /* dgram */);
-        payload = Buffer.concat([header, actualPayload]); // First packet: PROXY header + payload
-        session.headerSent = true;
-      } catch (err) {
-        console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
-      }
-    }
+    const trySendUdp = async (targetIndex: number) => {
+      const target = udpTargets[targetIndex];
+      session!.activeTargetIndex = targetIndex;
+      let payload = actualPayload;
 
-    session.destSocket.send(payload, rule.target.udp!, rule.target.host, (err: Error | null) => {
-      if (err) {
-        console.error(chalk.red(`[UDP] ✗ Send error to ${rule.target.host}:${rule.target.udp}:`), err.message);
-        return;
-      }
-
-      if (!session!.logged) {
-        console.log(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${rule.target.host}:${rule.target.udp} (${payload.length} bytes)`));
-        session!.logged = true;
-      }
-
-      if (rule.webhook && !session!.notified && rule.webhook.trim() !== '') {
-        session!.notified = true;
-        const targetKey = `${rule.target.host}:${rule.target.udp}`;
-
-        if (useRestApi) {
-          connectionBuffer.addPending(originalIP, originalPort, 'UDP', targetKey, () => {
-          });
-        } else {
-          // Non-REST API mode: aggregate notifications to avoid spam
-          addToConnectGroup(rule.webhook, targetKey, originalIP, originalPort, 'UDP');
+      if (rule.haproxy && !session!.headerSent) {
+        try {
+          let resolvedTargetHost = target.host;
+          if (net.isIP(resolvedTargetHost) === 0) {
+            const addr = await dns.promises.lookup(target.host);
+            resolvedTargetHost = addr.address;
+          }
+          session!.destHostResolved = resolvedTargetHost;
+          const header = generateProxyProtocolV2Header(originalIP, originalPort, resolvedTargetHost, target.udp!, true /* dgram */);
+          payload = Buffer.concat([header, actualPayload]);
+          session!.headerSent = true;
+        } catch (err) {
+          session!.destHostResolved = target.host;
+          console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
         }
       }
-    });
+
+      session!.destSocket.send(payload, target.udp!, target.host, async (err: Error | null) => {
+        if (err) {
+          console.error(chalk.red(`[UDP] ✗ Send error to ${target.host}:${target.udp}:`), err.message);
+          if (targetIndex + 1 < udpTargets.length) {
+            console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+            session!.headerSent = false;
+            session!.logged = false;
+            session!.notified = false;
+            session!.destHostResolved = undefined;
+            await trySendUdp(targetIndex + 1);
+          }
+          return;
+        }
+
+        if (!session!.logged) {
+          console.log(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${target.host}:${target.udp} (${payload.length} bytes)`));
+          session!.logged = true;
+        }
+
+        if (rule.webhook && !session!.notified && rule.webhook.trim() !== '') {
+          session!.notified = true;
+          const targetKey = `${target.host}:${target.udp}`;
+
+          if (useRestApi) {
+            connectionBuffer.addPending(originalIP, originalPort, 'UDP', targetKey, () => {
+            });
+          } else {
+            addToConnectGroup(rule.webhook, targetKey, originalIP, originalPort, 'UDP');
+          }
+        }
+      });
+    };
+
+    void trySendUdp(session.activeTargetIndex);
   });
 
   server.on('listening', () => {
@@ -730,21 +821,24 @@ async function main() {
     });
 
     for (const rule of cfg.listeners) {
-      if (rule.tcp !== undefined && rule.target.tcp !== undefined) {
+      const tcpTargets = getTargetsForProtocol(rule, 'tcp');
+      const udpTargets = getTargetsForProtocol(rule, 'udp');
+
+      if (rule.tcp !== undefined && tcpTargets.length > 0) {
         startTcpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.blue('TCP'),
           chalk.cyan(`${rule.bind}:${rule.tcp}`),
-          chalk.yellow(`${rule.target.host}:${rule.target.tcp}`),
+          chalk.yellow(tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')),
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
-      if (rule.udp !== undefined && rule.target.udp !== undefined) {
+      if (rule.udp !== undefined && udpTargets.length > 0) {
         startUdpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.magenta('UDP'),
           chalk.cyan(`${rule.bind}:${rule.udp}`),
-          chalk.yellow(`${rule.target.host}:${rule.target.udp}`),
+          chalk.yellow(udpTargets.map((target) => `${target.host}:${target.udp}`).join(' -> ')),
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
