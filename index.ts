@@ -35,6 +35,11 @@ type ListenerRule = {
   }>;
 };
 
+type ResolvedAddress = {
+  address: string;
+  family: 4 | 6;
+};
+
 const CONFIG_FILE = path.join(process.cwd(), 'config.yml');
 const playerMapper = new TimestampPlayerMapper();
 const connectionBuffer = new ConnectionBuffer();
@@ -176,6 +181,73 @@ function normalizePort(value: unknown, fieldName: string): number | undefined {
   return parsed;
 }
 
+function stripHostBrackets(host: string): string {
+  const trimmed = host.trim();
+  if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
+function normalizeIPAddress(ip: string): string {
+  const normalized = stripHostBrackets(ip);
+  if (normalized.startsWith('::ffff:')) {
+    const parts = normalized.split(':');
+    const last = parts[parts.length - 1];
+    if (net.isIP(last) === 4) {
+      return last;
+    }
+  }
+  return normalized;
+}
+
+function formatHostPort(host: string, port?: number): string {
+  const normalizedHost = stripHostBrackets(host);
+  const renderedHost = net.isIP(normalizedHost) === 6 ? `[${normalizedHost}]` : normalizedHost;
+  return port === undefined ? renderedHost : `${renderedHost}:${port}`;
+}
+
+function formatResolvedTarget(host: string, port: number, resolvedAddress?: string): string {
+  if (!resolvedAddress) {
+    return formatHostPort(host, port);
+  }
+
+  const normalizedHost = normalizeIPAddress(host);
+  const normalizedResolved = normalizeIPAddress(resolvedAddress);
+  if (normalizedHost === normalizedResolved) {
+    return formatHostPort(normalizedResolved, port);
+  }
+
+  return `${formatHostPort(normalizedHost, port)} [${normalizedResolved}]`;
+}
+
+async function resolveTargetAddresses(host: string): Promise<ResolvedAddress[]> {
+  const normalizedHost = normalizeIPAddress(host);
+  const literalFamily = net.isIP(normalizedHost);
+  if (literalFamily === 4 || literalFamily === 6) {
+    return [{ address: normalizedHost, family: literalFamily }];
+  }
+
+  const lookedUp = await dns.promises.lookup(normalizedHost, {
+    all: true,
+    verbatim: true,
+  });
+
+  const seen = new Set<string>();
+  const resolved: ResolvedAddress[] = [];
+
+  for (const entry of lookedUp) {
+    const normalizedAddress = normalizeIPAddress(entry.address);
+    const family = net.isIP(normalizedAddress);
+    if ((family === 4 || family === 6) && !seen.has(`${family}:${normalizedAddress}`)) {
+      seen.add(`${family}:${normalizedAddress}`);
+      resolved.push({ address: normalizedAddress, family });
+    }
+  }
+
+  return resolved;
+}
+
 function normalizeTarget(target: any, fieldName: string) {
   if (!target || typeof target !== 'object') {
     throw new Error(`${fieldName} must be an object`);
@@ -187,7 +259,7 @@ function normalizeTarget(target: any, fieldName: string) {
 
   return {
     ...target,
-    host: target.host.trim(),
+    host: stripHostBrackets(target.host),
     tcp: normalizePort(target.tcp, `${fieldName}.tcp`),
     udp: normalizePort(target.udp, `${fieldName}.udp`),
   };
@@ -264,24 +336,29 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     const originalIP = clientSocket.remoteAddress || '0.0.0.0';
     const originalPort = clientSocket.remotePort || 0;
     let activeTarget = tcpTargets[0];
-    let targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
+    let targetStr = formatHostPort(activeTarget.host, activeTarget.tcp);
     
     let clientToServerBytes = 0;
     let serverToClientBytes = 0;
     let isClosed = false;
-
-    console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')}`));
-    
-    // 初回データ受信までのタイムアウト（接続後のアイドル切断には使わない）
-    const initialDataTimer = setTimeout(() => {
-      if (isClosed) return;
-      console.error(chalk.red(`[TCP] ✗ No initial data within ${INITIAL_CLIENT_DATA_TIMEOUT_MS}ms from ${clientAddr}`));
-      cleanup();
-    }, INITIAL_CLIENT_DATA_TIMEOUT_MS);
-    
     let firstChunk: Buffer | null = null;
     let destConnected = false;
     let destSocket: net.Socket | null = null;
+    let initialDataTimer: ReturnType<typeof setTimeout> | null = null;
+    let initialDataHandled = false;
+
+    const handleInitialData = (buf: Buffer) => {
+      if (initialDataHandled) {
+        return;
+      }
+      initialDataHandled = true;
+      clientSocket.off('data', handleInitialData);
+      void processInitialData(buf);
+    };
+
+    // Bun では接続直後に届く最初のデータを取りこぼすことがあるため、
+    // 他のログや初期化より先に listener を貼る。
+    clientSocket.on('data', handleInitialData);
 
     // クリーンアップ関数
     const cleanup = () => {
@@ -303,9 +380,19 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       }
     };
 
-    // 最初のデータを待つ
-    clientSocket.once('data', async (buf) => {
-      clearTimeout(initialDataTimer);
+    console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => formatHostPort(target.host, target.tcp)).join(' -> ')}`));
+    
+    // 初回データ受信までのタイムアウト（接続後のアイドル切断には使わない）
+    initialDataTimer = setTimeout(() => {
+      if (isClosed) return;
+      console.error(chalk.red(`[TCP] ✗ No initial data within ${INITIAL_CLIENT_DATA_TIMEOUT_MS}ms from ${clientAddr}`));
+      cleanup();
+    }, INITIAL_CLIENT_DATA_TIMEOUT_MS);
+
+    const processInitialData = async (buf: Buffer) => {
+      if (initialDataTimer) {
+        clearTimeout(initialDataTimer);
+      }
       firstChunk = buf;
       
       let proxyIP = originalIP;
@@ -347,7 +434,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
       };
 
-      const connectToTargets = (targetIndex: number) => {
+      const connectToTargets = async (targetIndex: number) => {
         if (isClosed) return;
         if (targetIndex >= tcpTargets.length) {
           console.error(chalk.red(`[TCP] ✗ All targets failed for ${clientAddr}`));
@@ -356,165 +443,216 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         }
 
         activeTarget = tcpTargets[targetIndex];
-        targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
-        console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr} (${targetIndex + 1}/${tcpTargets.length})`));
+        targetStr = formatHostPort(activeTarget.host, activeTarget.tcp);
 
-        const currentSocket = net.createConnection({
-          host: activeTarget.host,
-          port: activeTarget.tcp!
-        });
-        destSocket = currentSocket;
-        currentSocket.setKeepAlive(true, 30_000);
-        clientSocket.setKeepAlive(true, 30_000);
-
-        let settled = false;
-        const moveToNextTarget = (reason: string, err?: Error) => {
-          if (settled || isClosed || destConnected) return;
-          settled = true;
-          clearTimeout(connectTimer);
-          console.error(chalk.red(`[TCP] ✗ ${reason} ${targetStr}${err ? `: ${err.message}` : ''}`));
-          if (err?.message.includes('ECONNREFUSED')) {
-            console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${targetStr}?`));
-          } else if (err?.message.includes('ETIMEDOUT')) {
-            console.error(chalk.red(`[TCP]   → Connection timed out. Check network connectivity.`));
-          } else if (err?.message.includes('EHOSTUNREACH') || err?.message.includes('ENETUNREACH')) {
-            console.error(chalk.red(`[TCP]   → Host unreachable. Check firewall and routing.`));
-          }
-          currentSocket.destroy();
+        let resolvedAddresses: ResolvedAddress[];
+        try {
+          resolvedAddresses = await resolveTargetAddresses(activeTarget.host);
+        } catch (err) {
+          console.error(
+            chalk.red(`[TCP] ✗ Failed to resolve ${activeTarget.host}:`),
+            err instanceof Error ? err.message : String(err)
+          );
           if (targetIndex + 1 < tcpTargets.length) {
             console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
-            connectToTargets(targetIndex + 1);
+            void connectToTargets(targetIndex + 1);
           } else {
             cleanup();
           }
-        };
+          return;
+        }
 
-        const connectTimer = setTimeout(() => {
-          moveToNextTarget('Destination connect timeout');
-        }, CONNECT_TIMEOUT_MS);
+        if (resolvedAddresses.length === 0) {
+          console.error(chalk.red(`[TCP] ✗ No IP addresses resolved for ${activeTarget.host}`));
+          if (targetIndex + 1 < tcpTargets.length) {
+            console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+            void connectToTargets(targetIndex + 1);
+          } else {
+            cleanup();
+          }
+          return;
+        }
 
-        currentSocket.on('connect', async () => {
-          if (settled || isClosed) return;
-          settled = true;
-          clearTimeout(connectTimer);
-          destConnected = true;
-          currentSocket.setTimeout(0);
-          console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
-
-          try {
-            if (rule.haproxy) {
-              const destPort = activeTarget.tcp || 0;
-              let destIP = activeTarget.host;
-
-              try {
-                if (net.isIP(destIP) === 0) {
-                  const addr = await dns.promises.lookup(destIP);
-                  destIP = addr.address;
-                  console.log(chalk.dim(`[TCP] Resolved ${activeTarget.host} to ${destIP}`));
-                }
-              } catch (err) {
-                console.warn(chalk.yellow('[TCP] Failed to resolve destination host, using original host'), err instanceof Error ? err.message : String(err));
-              }
-
-              const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
-              console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
-
-              currentSocket.write(header, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
-                  cleanup();
-                  return;
-                }
-
-                if (firstChunk) {
-                  console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
-                  currentSocket.write(firstChunk, (err) => {
-                    if (err) {
-                      console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
-                      cleanup();
-                      return;
-                    }
-                    setupPiping();
-                  });
-                } else {
-                  setupPiping();
-                }
-              });
-            } else if (firstChunk) {
-              currentSocket.write(firstChunk, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
-                  cleanup();
-                  return;
-                }
-                setupPiping();
-              });
+        const connectToResolvedAddress = (addressIndex: number) => {
+          if (isClosed) return;
+          if (addressIndex >= resolvedAddresses.length) {
+            if (targetIndex + 1 < tcpTargets.length) {
+              console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+              void connectToTargets(targetIndex + 1);
             } else {
-              setupPiping();
+              cleanup();
             }
+            return;
+          }
 
-            if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
-              webhookSentForConn = true;
-              if (useRestApi) {
-                connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {});
+          const resolvedTarget = resolvedAddresses[addressIndex];
+          const attemptTargetStr = formatResolvedTarget(
+            activeTarget.host,
+            activeTarget.tcp!,
+            resolvedTarget.address
+          );
+          console.log(
+            chalk.cyan(
+              `[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${attemptTargetStr} (${targetIndex + 1}/${tcpTargets.length})`
+            )
+          );
+
+          const currentSocket = net.createConnection({
+            host: resolvedTarget.address,
+            port: activeTarget.tcp!,
+            family: resolvedTarget.family,
+          });
+          destSocket = currentSocket;
+          currentSocket.setKeepAlive(true, 30_000);
+          clientSocket.setKeepAlive(true, 30_000);
+
+          let settled = false;
+          const moveToNextTarget = (reason: string, err?: Error) => {
+            if (settled || isClosed || destConnected) return;
+            settled = true;
+            clearTimeout(connectTimer);
+            console.error(chalk.red(`[TCP] ✗ ${reason} ${attemptTargetStr}${err ? `: ${err.message}` : ''}`));
+            if (err?.message.includes('ECONNREFUSED')) {
+              console.error(chalk.red(`[TCP]   → Connection refused. Is the target server running on ${attemptTargetStr}?`));
+            } else if (err?.message.includes('ETIMEDOUT')) {
+              console.error(chalk.red(`[TCP]   → Connection timed out. Check network connectivity.`));
+            } else if (err?.message.includes('EHOSTUNREACH') || err?.message.includes('ENETUNREACH')) {
+              console.error(chalk.red(`[TCP]   → Host unreachable. Check firewall and routing.`));
+            }
+            currentSocket.destroy();
+            if (addressIndex + 1 < resolvedAddresses.length) {
+              console.log(chalk.yellow(`[TCP] ↻ Trying alternate address for ${formatHostPort(activeTarget.host, activeTarget.tcp)}`));
+              connectToResolvedAddress(addressIndex + 1);
+            } else if (targetIndex + 1 < tcpTargets.length) {
+              console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+              void connectToTargets(targetIndex + 1);
+            } else {
+              cleanup();
+            }
+          };
+
+          const connectTimer = setTimeout(() => {
+            moveToNextTarget('Destination connect timeout');
+          }, CONNECT_TIMEOUT_MS);
+
+          currentSocket.on('connect', async () => {
+            if (settled || isClosed) return;
+            settled = true;
+            clearTimeout(connectTimer);
+            destConnected = true;
+            currentSocket.setTimeout(0);
+            console.log(chalk.green(`[TCP] ✓ Connected to target ${attemptTargetStr}`));
+
+            try {
+              if (rule.haproxy) {
+                const destPort = activeTarget.tcp || 0;
+                const destIP = resolvedTarget.address;
+                const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
+                console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${formatHostPort(destIP, destPort)}`));
+
+                currentSocket.write(header, (err) => {
+                  if (err) {
+                    console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
+                    cleanup();
+                    return;
+                  }
+
+                  if (firstChunk) {
+                    console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+                    currentSocket.write(firstChunk, (err) => {
+                      if (err) {
+                        console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                        cleanup();
+                        return;
+                      }
+                      setupPiping();
+                    });
+                  } else {
+                    setupPiping();
+                  }
+                });
+              } else if (firstChunk) {
+                currentSocket.write(firstChunk, (err) => {
+                  if (err) {
+                    console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                    cleanup();
+                    return;
+                  }
+                  setupPiping();
+                });
               } else {
-                addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
+                setupPiping();
               }
+
+              if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
+                webhookSentForConn = true;
+                if (useRestApi) {
+                  connectionBuffer.addPending(proxyIP, proxyPort, 'TCP', targetStr, () => {});
+                } else {
+                  addToConnectGroup(rule.webhook, targetStr, proxyIP, proxyPort, 'TCP');
+                }
+              }
+            } catch (err) {
+              console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
+              cleanup();
             }
-          } catch (err) {
-            console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
+          });
+
+          currentSocket.on('error', (err: Error) => {
+            if (!settled && !destConnected) {
+              moveToNextTarget('Destination socket error', err);
+              return;
+            }
+            console.error(chalk.red(`[TCP] ✗ Destination socket error ${attemptTargetStr}:`), err.message);
             cleanup();
-          }
-        });
+          });
 
-        currentSocket.on('error', (err: Error) => {
-          if (!settled && !destConnected) {
-            moveToNextTarget('Destination socket error', err);
-            return;
-          }
-          console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
-          cleanup();
-        });
-
-        currentSocket.on('timeout', () => {
-          if (!settled && !destConnected) {
-            moveToNextTarget('Destination socket timeout');
-            return;
-          }
-          console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${targetStr}`));
-          cleanup();
-        });
-
-        currentSocket.on('close', () => {
-          clearTimeout(connectTimer);
-          if (!settled && !destConnected) {
-            moveToNextTarget('Destination socket closed before connect');
-            return;
-          }
-          if (!isClosed) {
-            console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
+          currentSocket.on('timeout', () => {
+            if (!settled && !destConnected) {
+              moveToNextTarget('Destination socket timeout');
+              return;
+            }
+            console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${attemptTargetStr}`));
             cleanup();
-          }
-        });
+          });
+
+          currentSocket.on('close', () => {
+            clearTimeout(connectTimer);
+            if (!settled && !destConnected) {
+              moveToNextTarget('Destination socket closed before connect');
+              return;
+            }
+            if (!isClosed) {
+              console.log(chalk.dim(`[TCP] Destination socket closed ${attemptTargetStr}`));
+              cleanup();
+            }
+          });
+        };
       };
 
-      connectToTargets(0);
-    });
+      void connectToTargets(0);
+    };
 
     clientSocket.on('error', (err: Error) => {
-      clearTimeout(initialDataTimer);
+      if (initialDataTimer) {
+        clearTimeout(initialDataTimer);
+      }
       console.error(chalk.red('[TCP] Client socket error:'), err.message);
       cleanup();
     });
 
     clientSocket.on('timeout', () => {
-      clearTimeout(initialDataTimer);
+      if (initialDataTimer) {
+        clearTimeout(initialDataTimer);
+      }
       console.error(chalk.red('[TCP] Client socket timeout'));
       cleanup();
     });
     
     clientSocket.on('close', () => {
-      clearTimeout(initialDataTimer);
+      if (initialDataTimer) {
+        clearTimeout(initialDataTimer);
+      }
       if (!isClosed) {
         cleanup();
       }
@@ -525,9 +663,9 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     console.error(chalk.red('[TCP] Server error:'), err.message);
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EACCES') {
-      console.error(chalk.red(`[TCP]   → Permission denied on ${bindAddr}:${rule.tcp}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
+      console.error(chalk.red(`[TCP]   → Permission denied on ${formatHostPort(bindAddr, rule.tcp)}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
     } else if (code === 'EADDRINUSE') {
-      console.error(chalk.red(`[TCP]   → ${bindAddr}:${rule.tcp} is already in use by another process.`));
+      console.error(chalk.red(`[TCP]   → ${formatHostPort(bindAddr, rule.tcp)} is already in use by another process.`));
     }
   });
 
@@ -549,7 +687,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
   type Session = {
     clientAddress: string;
     clientPort: number;
-    destSocket: dgram.Socket;
+    destSocket?: dgram.Socket;
+    destSocketType?: 'udp4' | 'udp6';
     playerName?: string;
     headerSent?: boolean;
     notified?: boolean;
@@ -566,10 +705,15 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
   const sessions = new Map<string, Session>();
 
-
-
   function sessionKey(address: string, port: number) {
     return `${address}:${port}`;
+  }
+
+  function resetSessionRoutingState(session: Session) {
+    session.headerSent = false;
+    session.logged = false;
+    session.notified = false;
+    session.destHostResolved = undefined;
   }
 
   function refreshSessionTimer(key: string, session: Session) {
@@ -593,13 +737,18 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         } else if (!useRestApi) {
           // Non-REST API mode: aggregate disconnect notifications
           const disconnectTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
-          addToDisconnectGroup(rule.webhook, `${disconnectTarget.host}:${disconnectTarget.udp}`, session.clientAddress, session.clientPort, 'UDP');
+          addToDisconnectGroup(rule.webhook, formatHostPort(disconnectTarget.host, disconnectTarget.udp), session.clientAddress, session.clientPort, 'UDP');
         }
       }
 
-      session.destSocket.close();
-      sessions.delete(key);
-      connectionStats.udp.active--;
+      if (session.destSocket) {
+        session.destSocket.close();
+        session.destSocket = undefined;
+        session.destSocketType = undefined;
+      }
+      if (sessions.delete(key)) {
+        connectionStats.udp.active--;
+      }
       console.log(chalk.dim(`[UDP] Session timeout ${session.clientAddress}:${session.clientPort} (idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms)`));
     }, UDP_SESSION_IDLE_TIMEOUT_MS);
   }
@@ -611,6 +760,87 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     }
   }
 
+  function closeSession(key: string, session: Session) {
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = undefined;
+    }
+    clearInitialResponseTimer(session);
+    if (session.destSocket) {
+      session.destSocket.close();
+      session.destSocket = undefined;
+      session.destSocketType = undefined;
+    }
+    if (sessions.delete(key)) {
+      connectionStats.udp.active--;
+    }
+  }
+
+  function createSessionDestSocket(key: string, session: Session, destSocketType: 'udp4' | 'udp6'): Promise<dgram.Socket> {
+    return new Promise((resolve, reject) => {
+      const destSocket = dgram.createSocket({ type: destSocketType });
+      let resolved = false;
+
+      destSocket.on('message', (response: Buffer) => {
+        const activeSession = sessions.get(key);
+        if (!activeSession) {
+          return;
+        }
+
+        activeSession.hasReceivedResponse = true;
+        clearInitialResponseTimer(activeSession);
+        refreshSessionTimer(key, activeSession);
+        server.send(response, activeSession.clientPort, activeSession.clientAddress, (err: Error | null) => {
+          if (err) {
+            console.error('[UDP] Error sending back to client', err.message);
+          }
+        });
+      });
+
+      destSocket.on('error', (err: Error) => {
+        if (!resolved) {
+          resolved = true;
+          reject(err);
+          return;
+        }
+
+        console.error('[UDP] Dest socket error', err.message);
+        const activeSession = sessions.get(key);
+        if (activeSession?.destSocket === destSocket) {
+          closeSession(key, activeSession);
+        } else {
+          destSocket.close();
+        }
+      });
+
+      destSocket.bind(() => {
+        if (resolved) {
+          destSocket.close();
+          return;
+        }
+        resolved = true;
+        session.destSocket = destSocket;
+        session.destSocketType = destSocketType;
+        resolve(destSocket);
+      });
+    });
+  }
+
+  async function ensureSessionDestSocket(key: string, session: Session, family: 4 | 6): Promise<dgram.Socket> {
+    const requiredSocketType = family === 6 ? 'udp6' : 'udp4';
+    if (session.destSocket && session.destSocketType === requiredSocketType) {
+      return session.destSocket;
+    }
+
+    if (session.destSocket) {
+      session.destSocket.close();
+      session.destSocket = undefined;
+      session.destSocketType = undefined;
+    }
+
+    return createSessionDestSocket(key, session, requiredSocketType);
+  }
+
   server.on('message', (msg: Buffer, rinfo: dgram.RemoteInfo) => {
     const key = sessionKey(rinfo.address, rinfo.port);
     let session = sessions.get(key);
@@ -618,39 +848,10 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     if (!session) {
       connectionStats.udp.total++;
       connectionStats.udp.active++;
-      
-      const destSocket = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
-      destSocket.on('message', (response: Buffer, destInfo: dgram.RemoteInfo) => {
-        const activeSession = sessions.get(key);
-        if (activeSession) {
-          activeSession.hasReceivedResponse = true;
-          clearInitialResponseTimer(activeSession);
-          // 返信トラフィックでもアイドルタイマーを更新
-          refreshSessionTimer(key, activeSession);
-        }
-        server.send(response, rinfo.port, rinfo.address, (err: Error | null) => {
-          if (err) console.error('[UDP] Error sending back to client', err.message);
-        });
-      });
-      destSocket.on('error', (err: Error) => {
-        console.error('[UDP] Dest socket error', err.message);
-        const activeSession = sessions.get(key);
-        if (activeSession) {
-          if (activeSession.timer) clearTimeout(activeSession.timer);
-          clearInitialResponseTimer(activeSession);
-          activeSession.destSocket.close();
-          sessions.delete(key);
-          connectionStats.udp.active--;
-        }
-      });
-      destSocket.bind(() => {
-        // None
-      });
 
       session = {
         clientAddress: rinfo.address,
         clientPort: rinfo.port,
-        destSocket,
         playerName: undefined,
         headerSent: false,
         notified: false,
@@ -664,23 +865,6 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         originalPort: undefined,
       };
       sessions.set(key, session);
-
-      const resolveSessionTarget = async (targetIndex: number) => {
-        const target = udpTargets[targetIndex] ?? udpTargets[0];
-        try {
-          let resolved = target.host;
-          if (net.isIP(resolved) === 0) {
-            const addr = await dns.promises.lookup(target.host);
-            resolved = addr.address;
-          }
-          session!.destHostResolved = resolved;
-        } catch {
-          session!.destHostResolved = target.host;
-        }
-      };
-
-      // Resolve target host to numeric IP for PROXY header (supports hostnames and local IPs like Tailscale)
-      void resolveSessionTarget(0);
     }
 
     // クライアントからの受信トラフィックでアイドルタイマー更新
@@ -697,7 +881,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
         actualPayload = chain.payload;
-        console.log(`[UDP] ${originalIP}:${originalPort} => ${activeTarget.host}:${activeTarget.udp} (payload=${actualPayload.length})`);
+        console.log(`[UDP] ${originalIP}:${originalPort} => ${formatHostPort(activeTarget.host, activeTarget.udp)} (payload=${actualPayload.length})`);
       }
     } catch (err) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
@@ -708,83 +892,130 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     const trySendUdp = async (targetIndex: number) => {
       const target = udpTargets[targetIndex];
-      session!.activeTargetIndex = targetIndex;
-      let payload = actualPayload;
-
-      if (rule.haproxy && !session!.headerSent) {
-        try {
-          let resolvedTargetHost = target.host;
-          if (net.isIP(resolvedTargetHost) === 0) {
-            const addr = await dns.promises.lookup(target.host);
-            resolvedTargetHost = addr.address;
-          }
-          session!.destHostResolved = resolvedTargetHost;
-          const header = generateProxyProtocolV2Header(originalIP, originalPort, resolvedTargetHost, target.udp!, true /* dgram */);
-          payload = Buffer.concat([header, actualPayload]);
-          session!.headerSent = true;
-        } catch (err) {
-          session!.destHostResolved = target.host;
-          console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
-        }
+      if (!target) {
+        return;
       }
 
-      session!.pendingPayload = payload;
+      session!.activeTargetIndex = targetIndex;
 
-      session!.destSocket.send(payload, target.udp!, target.host, async (err: Error | null) => {
-        if (err) {
-          console.error(chalk.red(`[UDP] ✗ Send error to ${target.host}:${target.udp}:`), err.message);
-          if (targetIndex + 1 < udpTargets.length) {
-            console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
-            session!.headerSent = false;
-            session!.logged = false;
-            session!.notified = false;
-            session!.destHostResolved = undefined;
-            await trySendUdp(targetIndex + 1);
+      let resolvedAddresses: ResolvedAddress[];
+      try {
+        resolvedAddresses = await resolveTargetAddresses(target.host);
+      } catch (err) {
+        console.error(
+          chalk.red(`[UDP] ✗ Failed to resolve ${target.host}:`),
+          err instanceof Error ? err.message : String(err)
+        );
+        if (targetIndex + 1 < udpTargets.length) {
+          console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+          resetSessionRoutingState(session!);
+          await trySendUdp(targetIndex + 1);
+        }
+        return;
+      }
+
+      if (resolvedAddresses.length === 0) {
+        console.error(chalk.red(`[UDP] ✗ No IP addresses resolved for ${target.host}`));
+        if (targetIndex + 1 < udpTargets.length) {
+          console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+          resetSessionRoutingState(session!);
+          await trySendUdp(targetIndex + 1);
+        }
+        return;
+      }
+
+      const sendToResolvedAddress = async (addressIndex: number) => {
+        const resolvedTarget = resolvedAddresses[addressIndex];
+        const attemptTargetStr = formatResolvedTarget(target.host, target.udp!, resolvedTarget.address);
+
+        let payload = actualPayload;
+        try {
+          const destSocket = await ensureSessionDestSocket(key, session!, resolvedTarget.family);
+          session!.destHostResolved = resolvedTarget.address;
+
+          if (rule.haproxy && !session!.headerSent) {
+            const header = generateProxyProtocolV2Header(
+              originalIP,
+              originalPort,
+              resolvedTarget.address,
+              target.udp!,
+              true
+            );
+            payload = Buffer.concat([header, actualPayload]);
+            session!.headerSent = true;
           }
-          return;
-        }
 
-        if (!session!.logged) {
-          console.log(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${target.host}:${target.udp} (${payload.length} bytes)`));
-          session!.logged = true;
-        }
+          session!.pendingPayload = payload;
 
-        if (rule.webhook && !session!.notified && rule.webhook.trim() !== '') {
-          session!.notified = true;
-          const targetKey = `${target.host}:${target.udp}`;
-
-          if (useRestApi) {
-            connectionBuffer.addPending(originalIP, originalPort, 'UDP', targetKey, () => {
-            });
-          } else {
-            addToConnectGroup(rule.webhook, targetKey, originalIP, originalPort, 'UDP');
-          }
-        }
-
-        if (!session!.hasReceivedResponse && !session!.responseTimer && targetIndex + 1 < udpTargets.length) {
-          session!.responseTimer = setTimeout(async () => {
-            const activeSession = sessions.get(key);
-            if (!activeSession || activeSession.hasReceivedResponse) {
+          destSocket.send(payload, target.udp!, resolvedTarget.address, async (err: Error | null) => {
+            if (err) {
+              console.error(chalk.red(`[UDP] ✗ Send error to ${attemptTargetStr}:`), err.message);
+              resetSessionRoutingState(session!);
+              if (addressIndex + 1 < resolvedAddresses.length) {
+                console.log(chalk.yellow(`[UDP] ↻ Trying alternate address for ${formatHostPort(target.host, target.udp)}`));
+                await sendToResolvedAddress(addressIndex + 1);
+              } else if (targetIndex + 1 < udpTargets.length) {
+                console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+                await trySendUdp(targetIndex + 1);
+              }
               return;
             }
 
-            const currentTarget = udpTargets[activeSession.activeTargetIndex] ?? udpTargets[0];
-            console.warn(chalk.yellow(
-              `[UDP] No response within ${UDP_INITIAL_RESPONSE_TIMEOUT_MS}ms from ${currentTarget.host}:${currentTarget.udp}; trying next target`
-            ));
-
-            activeSession.headerSent = false;
-            activeSession.logged = false;
-            activeSession.notified = false;
-            activeSession.destHostResolved = undefined;
-            clearInitialResponseTimer(activeSession);
-
-            if (activeSession.activeTargetIndex + 1 < udpTargets.length) {
-              await trySendUdp(activeSession.activeTargetIndex + 1);
+            if (!session!.logged) {
+              console.log(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${attemptTargetStr} (${payload.length} bytes)`));
+              session!.logged = true;
             }
-          }, UDP_INITIAL_RESPONSE_TIMEOUT_MS);
+
+            if (rule.webhook && !session!.notified && rule.webhook.trim() !== '') {
+              session!.notified = true;
+              const targetKey = formatHostPort(target.host, target.udp);
+
+              if (useRestApi) {
+                connectionBuffer.addPending(originalIP, originalPort, 'UDP', targetKey, () => {
+                });
+              } else {
+                addToConnectGroup(rule.webhook, targetKey, originalIP, originalPort, 'UDP');
+              }
+            }
+
+            const hasAlternateAddress = addressIndex + 1 < resolvedAddresses.length;
+            const hasNextTarget = targetIndex + 1 < udpTargets.length;
+            if (!session!.hasReceivedResponse && !session!.responseTimer && (hasAlternateAddress || hasNextTarget)) {
+              session!.responseTimer = setTimeout(async () => {
+                const activeSession = sessions.get(key);
+                if (!activeSession || activeSession.hasReceivedResponse) {
+                  return;
+                }
+
+                console.warn(chalk.yellow(
+                  `[UDP] No response within ${UDP_INITIAL_RESPONSE_TIMEOUT_MS}ms from ${attemptTargetStr}; trying ${hasAlternateAddress ? 'alternate address' : 'next target'}`
+                ));
+
+                resetSessionRoutingState(activeSession);
+                clearInitialResponseTimer(activeSession);
+
+                if (hasAlternateAddress) {
+                  await sendToResolvedAddress(addressIndex + 1);
+                } else if (hasNextTarget) {
+                  await trySendUdp(targetIndex + 1);
+                }
+              }, UDP_INITIAL_RESPONSE_TIMEOUT_MS);
+            }
+          });
+        } catch (err) {
+          console.error(chalk.red(`[UDP] ✗ Failed to prepare ${attemptTargetStr}:`), err instanceof Error ? err.message : String(err));
+          resetSessionRoutingState(session!);
+          if (addressIndex + 1 < resolvedAddresses.length) {
+            console.log(chalk.yellow(`[UDP] ↻ Trying alternate address for ${formatHostPort(target.host, target.udp)}`));
+            await sendToResolvedAddress(addressIndex + 1);
+          } else if (targetIndex + 1 < udpTargets.length) {
+            console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+            await trySendUdp(targetIndex + 1);
+          }
         }
-      });
+      };
+
+      await sendToResolvedAddress(0);
     };
 
     void trySendUdp(session.activeTargetIndex);
@@ -798,9 +1029,9 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     console.error('[UDP] Server error', err.message);
     const code = (err as NodeJS.ErrnoException).code;
     if (code === 'EACCES') {
-      console.error(chalk.red(`[UDP]   → Permission denied on ${bindAddr}:${rule.udp}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
+      console.error(chalk.red(`[UDP]   → Permission denied on ${formatHostPort(bindAddr, rule.udp)}. Privileged ports (e.g. 80/443) may require elevated privileges.`));
     } else if (code === 'EADDRINUSE') {
-      console.error(chalk.red(`[UDP]   → ${bindAddr}:${rule.udp} is already in use by another process.`));
+      console.error(chalk.red(`[UDP]   → ${formatHostPort(bindAddr, rule.udp)} is already in use by another process.`));
     }
   });
 
@@ -878,8 +1109,8 @@ async function main() {
         startTcpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.blue('TCP'),
-          chalk.cyan(`${rule.bind}:${rule.tcp}`),
-          chalk.yellow(tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')),
+          chalk.cyan(formatHostPort(rule.bind, rule.tcp)),
+          chalk.yellow(tcpTargets.map((target) => formatHostPort(target.host, target.tcp)).join(' -> ')),
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
@@ -887,8 +1118,8 @@ async function main() {
         startUdpProxy(rule, useRestApi);
         listenerTable.push([
           chalk.magenta('UDP'),
-          chalk.cyan(`${rule.bind}:${rule.udp}`),
-          chalk.yellow(udpTargets.map((target) => `${target.host}:${target.udp}`).join(' -> ')),
+          chalk.cyan(formatHostPort(rule.bind, rule.udp)),
+          chalk.yellow(udpTargets.map((target) => formatHostPort(target.host, target.udp)).join(' -> ')),
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗')
         ]);
       }
