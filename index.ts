@@ -342,6 +342,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     // 最初のデータを待つ
     clientSocket.once('data', async (buf) => {
       clearTimeout(initialDataTimer);
+      clientSocket.pause();
+      console.log(chalk.gray(`[TCP] Client socket paused after initial data for ${clientAddr}`));
       firstChunk = buf;
       console.log(chalk.gray(`[TCP] Initial client data ${getBufferPreview(buf)}`));
       
@@ -406,6 +408,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         });
 
         clientSocket.pipe(socket);
+        clientSocket.resume();
+        console.log(chalk.gray(`[TCP] Client socket resumed for ${clientAddr}`));
         console.log(chalk.gray(`[TCP] Client -> target piping armed for ${clientAddr}`));
         maybeLogPipingEstablished();
       };
