@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
+import { isRakNetSessionStartPacket } from '../services/raknetPacket.js';
 import { buildUdpForwardPayload } from '../services/udpProxyForwarding.js';
 import { getOriginalClientFromHeaders, parseProxyV2Chain } from '../services/proxyProtocolParser.js';
 
@@ -70,5 +71,33 @@ describe('TCP PROXY protocol forwarding', () => {
 
     expect(parsed.headers).toHaveLength(1);
     expect(parsed.payload.equals(payload)).toBe(true);
+  });
+
+  test('detects RakNet offline ping and open connection packets as UDP session starts', () => {
+    const magic = Buffer.from([
+      0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
+      0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78,
+    ]);
+
+    const unconnectedPing = Buffer.concat([
+      Buffer.from([0x01]),
+      Buffer.alloc(8, 0x11),
+      magic,
+      Buffer.alloc(8, 0x22),
+    ]);
+    const openConnectionRequest1 = Buffer.concat([
+      Buffer.from([0x05]),
+      magic,
+      Buffer.from([0x0b]),
+      Buffer.alloc(10, 0x00),
+    ]);
+    const regularConnectedPacket = Buffer.concat([
+      Buffer.from([0x84]),
+      Buffer.alloc(10, 0x00),
+    ]);
+
+    expect(isRakNetSessionStartPacket(unconnectedPing)).toBe(true);
+    expect(isRakNetSessionStartPacket(openConnectionRequest1)).toBe(true);
+    expect(isRakNetSessionStartPacket(regularConnectedPacket)).toBe(false);
   });
 });

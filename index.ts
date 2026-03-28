@@ -5,6 +5,7 @@ import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
 import { buildUdpForwardPayload } from './services/udpProxyForwarding.js';
 import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
+import { isRakNetSessionStartPacket } from './services/raknetPacket.js';
 import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
 import { ConnectionBuffer } from './services/connectionBuffer.js';
 import { PlayerIPMapper } from './services/playerIPMapper.js';
@@ -858,10 +859,27 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           return;
         }
 
+        let clientResponse = response;
+        try {
+          const proxiedResponse = parseProxyV2Chain(response);
+          if (proxiedResponse.headers.length > 0) {
+            clientResponse = proxiedResponse.payload;
+            console.log(chalk.dim(`[UDP] Stripped backend PROXY header (${response.length - clientResponse.length} bytes) for ${activeSession.clientAddress}:${activeSession.clientPort}`));
+          }
+        } catch {
+          // Regular UDP payload
+        }
+
+        if (!activeSession.hasReceivedResponse) {
+          const resolvedHost = activeSession.destHostResolved ?? 'unknown-target';
+          const target = udpTargets[activeSession.activeTargetIndex] ?? udpTargets[0];
+          console.log(chalk.green(`[UDP] ✓ Response ${formatHostPort(resolvedHost, target?.udp)} => ${activeSession.clientAddress}:${activeSession.clientPort} (${clientResponse.length} bytes)`));
+        }
+
         activeSession.hasReceivedResponse = true;
         clearInitialResponseTimer(activeSession);
         refreshSessionTimer(key, activeSession);
-        server.send(response, activeSession.clientPort, activeSession.clientAddress, (err: Error | null) => {
+        server.send(clientResponse, activeSession.clientPort, activeSession.clientAddress, (err: Error | null) => {
           if (err) {
             console.error('[UDP] Error sending back to client', err.message);
           }
@@ -959,6 +977,10 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     session.originalIP = originalIP;
     session.originalPort = originalPort;
+
+    if (rule.haproxy && isRakNetSessionStartPacket(actualPayload)) {
+      session.headerSent = false;
+    }
 
     const trySendUdp = async (targetIndex: number) => {
       const target = udpTargets[targetIndex];
