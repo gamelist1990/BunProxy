@@ -391,9 +391,19 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         socket.on('data', (chunk) => {
           serverToClientBytes += chunk.length;
           logServerChunk('Target -> client chunk', chunk);
+          const flushed = clientSocket.write(chunk);
+          if (!flushed) {
+            console.log(chalk.gray(`[TCP] Client socket backpressure while sending to ${clientAddr}; pausing target reads`));
+            socket.pause();
+          }
         });
 
-        socket.pipe(clientSocket);
+        clientSocket.on('drain', () => {
+          if (!socket.destroyed) {
+            socket.resume();
+            console.log(chalk.gray(`[TCP] Client socket drain for ${clientAddr}; resumed target reads`));
+          }
+        });
         console.log(chalk.gray(`[TCP] Target -> client piping armed for ${clientAddr}`));
         maybeLogPipingEstablished();
       };
@@ -405,9 +415,20 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         clientSocket.on('data', (chunk) => {
           clientToServerBytes += chunk.length;
           logClientChunk('Client -> target live chunk', chunk);
+          const flushed = socket.write(chunk);
+          if (!flushed) {
+            console.log(chalk.gray(`[TCP] Target socket backpressure for ${clientAddr}; pausing client reads`));
+            clientSocket.pause();
+          }
         });
 
-        clientSocket.pipe(socket);
+        socket.on('drain', () => {
+          if (!clientSocket.destroyed) {
+            clientSocket.resume();
+            console.log(chalk.gray(`[TCP] Target socket drain for ${clientAddr}; resumed client reads`));
+          }
+        });
+
         clientSocket.resume();
         console.log(chalk.gray(`[TCP] Client socket resumed for ${clientAddr}`));
         console.log(chalk.gray(`[TCP] Client -> target piping armed for ${clientAddr}`));
@@ -433,7 +454,9 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         destSocket = currentSocket;
         console.log(chalk.gray(`[TCP] Created destination socket for ${targetStr}`));
         currentSocket.setKeepAlive(true, 30_000);
+        currentSocket.setNoDelay(true);
         clientSocket.setKeepAlive(true, 30_000);
+        clientSocket.setNoDelay(true);
 
         let settled = false;
         const moveToNextTarget = (reason: string, err?: Error) => {
@@ -473,6 +496,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           setupServerToClientPiping(currentSocket);
 
           try {
+            let initialWriteBuffer: Buffer | null = null;
+
             if (rule.haproxy) {
               const destPort = activeTarget.tcp || 0;
               let destIP = activeTarget.host;
@@ -490,36 +515,21 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
               const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
               console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
               console.log(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(header)}`));
-
-              currentSocket.write(header, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
-                  cleanup();
-                  return;
-                }
-
-                if (firstChunk) {
-                  console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
-                  logClientChunk('Initial payload -> target', firstChunk);
-                  clientToServerBytes += firstChunk.length;
-                  currentSocket.write(firstChunk, (writeErr) => {
-                    if (writeErr) {
-                      console.error(chalk.red('[TCP] Failed to write initial data:'), writeErr.message);
-                      cleanup();
-                      return;
-                    }
-                    setupClientToServerPiping(currentSocket);
-                  });
-                } else {
-                  setupClientToServerPiping(currentSocket);
-                }
-              });
+              initialWriteBuffer = firstChunk ? Buffer.concat([header, firstChunk]) : header;
             } else if (firstChunk) {
+              initialWriteBuffer = firstChunk;
+            }
+
+            if (firstChunk) {
               logClientChunk('Initial payload -> target', firstChunk);
               clientToServerBytes += firstChunk.length;
-              currentSocket.write(firstChunk, (err) => {
+              console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+            }
+
+            if (initialWriteBuffer) {
+              currentSocket.write(initialWriteBuffer, (err) => {
                 if (err) {
-                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
+                  console.error(chalk.red('[TCP] Failed to write initial TCP preface:'), err.message);
                   cleanup();
                   return;
                 }
@@ -563,6 +573,9 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
         currentSocket.on('end', () => {
           console.log(chalk.gray(`[TCP] Destination socket ended ${targetStr}`));
+          if (!clientSocket.destroyed) {
+            clientSocket.end();
+          }
         });
 
         currentSocket.on('close', () => {
@@ -596,6 +609,9 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     clientSocket.on('end', () => {
       clearTimeout(initialDataTimer);
       console.log(chalk.gray(`[TCP] Client socket ended ${clientAddr}`));
+      if (destSocket && !destSocket.destroyed) {
+        destSocket.end();
+      }
     });
     
     clientSocket.on('close', () => {
