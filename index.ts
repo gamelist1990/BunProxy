@@ -3,6 +3,7 @@ import path from 'path';
 import net from 'net';
 import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
+import { buildUdpForwardPayload } from './services/udpProxyForwarding.js';
 import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
 import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
 import { ConnectionBuffer } from './services/connectionBuffer.js';
@@ -692,14 +693,12 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     destSocket?: dgram.Socket;
     destSocketType?: 'udp4' | 'udp6';
     playerName?: string;
-    headerSent?: boolean;
     notified?: boolean;
     logged?: boolean;
     destHostResolved?: string;
     activeTargetIndex: number;
     hasReceivedResponse: boolean;
     responseTimer?: ReturnType<typeof setTimeout>;
-    pendingPayload?: Buffer;
     originalIP?: string;
     originalPort?: number;
     timer?: ReturnType<typeof setTimeout>;
@@ -712,7 +711,6 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
   }
 
   function resetSessionRoutingState(session: Session) {
-    session.headerSent = false;
     session.logged = false;
     session.notified = false;
     session.destHostResolved = undefined;
@@ -855,14 +853,12 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         clientAddress: rinfo.address,
         clientPort: rinfo.port,
         playerName: undefined,
-        headerSent: false,
         notified: false,
         logged: false,
         destHostResolved: undefined,
         activeTargetIndex: 0,
         hasReceivedResponse: false,
         responseTimer: undefined,
-        pendingPayload: undefined,
         originalIP: undefined,
         originalPort: undefined,
       };
@@ -935,19 +931,15 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           const destSocket = await ensureSessionDestSocket(key, session!, resolvedTarget.family);
           session!.destHostResolved = resolvedTarget.address;
 
-          if (rule.haproxy && !session!.headerSent) {
-            const header = generateProxyProtocolV2Header(
+          if (rule.haproxy) {
+            payload = buildUdpForwardPayload(
+              actualPayload,
               originalIP,
               originalPort,
               resolvedTarget.address,
-              target.udp!,
-              true
+              target.udp!
             );
-            payload = Buffer.concat([header, actualPayload]);
-            session!.headerSent = true;
           }
-
-          session!.pendingPayload = payload;
 
           destSocket.send(payload, target.udp!, resolvedTarget.address, async (err: Error | null) => {
             if (err) {

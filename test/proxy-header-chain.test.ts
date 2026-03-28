@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
+import { buildUdpForwardPayload } from '../services/udpProxyForwarding.js';
 import { getOriginalClientFromHeaders, parseProxyV2Chain } from '../services/proxyProtocolParser.js';
 
 describe('TCP PROXY protocol forwarding', () => {
@@ -52,5 +53,33 @@ describe('TCP PROXY protocol forwarding', () => {
 
     expect(reparsed.headers).toHaveLength(1);
     expect(reparsed.payload.equals(payload)).toBe(true);
+  });
+
+  test('UDP forwarding prepends a PROXY header to every datagram payload', () => {
+    const firstPayload = Buffer.from('query-one', 'utf8');
+    const secondPayload = Buffer.from('query-two', 'utf8');
+
+    const firstDatagram = buildUdpForwardPayload(
+      firstPayload,
+      '175.130.34.175',
+      55280,
+      '132.145.123.39',
+      5000
+    );
+    const secondDatagram = buildUdpForwardPayload(
+      secondPayload,
+      '175.130.34.175',
+      55280,
+      '132.145.123.39',
+      5000
+    );
+
+    const firstParsed = parseProxyV2Chain(firstDatagram);
+    const secondParsed = parseProxyV2Chain(secondDatagram);
+
+    expect(firstParsed.headers).toHaveLength(1);
+    expect(secondParsed.headers).toHaveLength(1);
+    expect(firstParsed.payload.equals(firstPayload)).toBe(true);
+    expect(secondParsed.payload.equals(secondPayload)).toBe(true);
   });
 });
