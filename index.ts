@@ -203,6 +203,22 @@ function getTargetsForProtocol(rule: ListenerRule, protocol: 'tcp' | 'udp') {
   return baseTargets.filter((target) => target[protocol] !== undefined);
 }
 
+function getBufferPreview(buffer: Buffer, maxBytes = 24): string {
+  if (buffer.length === 0) {
+    return '0B';
+  }
+
+  const preview = buffer.subarray(0, Math.min(buffer.length, maxBytes));
+  const hex = Array.from(preview)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join(' ');
+  const ascii = Array.from(preview)
+    .map((byte) => (byte >= 0x20 && byte <= 0x7e ? String.fromCharCode(byte) : '.'))
+    .join('');
+  const suffix = buffer.length > maxBytes ? ' ...' : '';
+  return `${buffer.length}B hex=[${hex}] ascii="${ascii}"${suffix}`;
+}
+
 function loadConfig(): { endpoint?: number; listeners: ListenerRule[] } {
   if (!fs.existsSync(CONFIG_FILE)) {
     writeDefaultConfig();
@@ -269,6 +285,26 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let clientToServerBytes = 0;
     let serverToClientBytes = 0;
     let isClosed = false;
+    let clientChunkLogCount = 0;
+    let serverChunkLogCount = 0;
+
+    const logClientChunk = (label: string, chunk: Buffer) => {
+      if (clientChunkLogCount < 5) {
+        console.log(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
+      } else if (clientChunkLogCount === 5) {
+        console.log(chalk.gray(`[TCP] Additional client->target chunk logs suppressed for ${clientAddr}`));
+      }
+      clientChunkLogCount++;
+    };
+
+    const logServerChunk = (label: string, chunk: Buffer) => {
+      if (serverChunkLogCount < 5) {
+        console.log(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
+      } else if (serverChunkLogCount === 5) {
+        console.log(chalk.gray(`[TCP] Additional target->client chunk logs suppressed for ${clientAddr}`));
+      }
+      serverChunkLogCount++;
+    };
 
     console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')}`));
     
@@ -307,6 +343,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     clientSocket.once('data', async (buf) => {
       clearTimeout(initialDataTimer);
       firstChunk = buf;
+      console.log(chalk.gray(`[TCP] Initial client data ${getBufferPreview(buf)}`));
       
       let proxyIP = originalIP;
       let proxyPort = originalPort;
@@ -321,12 +358,18 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
               proxyIP = orig.ip || proxyIP;
               proxyPort = orig.port || proxyPort;
             }
+            firstChunk = chain.payload.length > 0 ? chain.payload : null;
+            if (firstChunk) {
+              console.log(chalk.gray(`[TCP] Initial payload after PROXY strip ${getBufferPreview(firstChunk)}`));
+            } else {
+              console.log(chalk.gray('[TCP] Initial payload after PROXY strip is empty'));
+            }
             console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
               layers: chain.headers.length,
               original: `${proxyIP}:${proxyPort}`
             });
           }
-        } catch (err) {
+        } catch (_err) {
           // Proxy headerではない通常のデータ
         }
       }
@@ -345,9 +388,11 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
         socket.on('data', (chunk) => {
           serverToClientBytes += chunk.length;
+          logServerChunk('Target -> client chunk', chunk);
         });
 
         socket.pipe(clientSocket);
+        console.log(chalk.gray(`[TCP] Target -> client piping armed for ${clientAddr}`));
         maybeLogPipingEstablished();
       };
 
@@ -357,9 +402,11 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
         clientSocket.on('data', (chunk) => {
           clientToServerBytes += chunk.length;
+          logClientChunk('Client -> target live chunk', chunk);
         });
 
         clientSocket.pipe(socket);
+        console.log(chalk.gray(`[TCP] Client -> target piping armed for ${clientAddr}`));
         maybeLogPipingEstablished();
       };
 
@@ -380,6 +427,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           port: activeTarget.tcp!
         });
         destSocket = currentSocket;
+        console.log(chalk.gray(`[TCP] Created destination socket for ${targetStr}`));
         currentSocket.setKeepAlive(true, 30_000);
         clientSocket.setKeepAlive(true, 30_000);
 
@@ -417,6 +465,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           destConnected = true;
           currentSocket.setTimeout(0);
           console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
+          console.log(chalk.gray(`[TCP] Destination socket local endpoint ${currentSocket.localAddress}:${currentSocket.localPort}`));
           setupServerToClientPiping(currentSocket);
 
           try {
@@ -436,6 +485,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
               const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
               console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
+              console.log(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(header)}`));
 
               currentSocket.write(header, (err) => {
                 if (err) {
@@ -446,6 +496,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
                 if (firstChunk) {
                   console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+                  logClientChunk('Initial payload -> target', firstChunk);
                   clientToServerBytes += firstChunk.length;
                   currentSocket.write(firstChunk, (writeErr) => {
                     if (writeErr) {
@@ -460,6 +511,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                 }
               });
             } else if (firstChunk) {
+              logClientChunk('Initial payload -> target', firstChunk);
               clientToServerBytes += firstChunk.length;
               currentSocket.write(firstChunk, (err) => {
                 if (err) {
@@ -505,6 +557,10 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           cleanup();
         });
 
+        currentSocket.on('end', () => {
+          console.log(chalk.gray(`[TCP] Destination socket ended ${targetStr}`));
+        });
+
         currentSocket.on('close', () => {
           clearTimeout(connectTimer);
           if (!settled && !destConnected) {
@@ -532,9 +588,15 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       console.error(chalk.red('[TCP] Client socket timeout'));
       cleanup();
     });
+
+    clientSocket.on('end', () => {
+      clearTimeout(initialDataTimer);
+      console.log(chalk.gray(`[TCP] Client socket ended ${clientAddr}`));
+    });
     
     clientSocket.on('close', () => {
       clearTimeout(initialDataTimer);
+      console.log(chalk.gray(`[TCP] Client socket closed ${clientAddr}`));
       if (!isClosed) {
         cleanup();
       }
@@ -575,6 +637,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     logged?: boolean;
     destHostResolved?: string;
     activeTargetIndex: number;
+    requestLogCount: number;
+    responseLogCount: number;
     timer?: ReturnType<typeof setTimeout>;
   };
 
@@ -631,6 +695,12 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         if (activeSession) {
           // 返信トラフィックでもアイドルタイマーを更新
           refreshSessionTimer(key, activeSession);
+          if (activeSession.responseLogCount < 3) {
+            console.log(chalk.gray(`[UDP] Target -> client datagram from ${destInfo.address}:${destInfo.port} ${getBufferPreview(response)}`));
+          } else if (activeSession.responseLogCount === 3) {
+            console.log(chalk.gray(`[UDP] Additional target->client datagram logs suppressed for ${activeSession.clientAddress}:${activeSession.clientPort}`));
+          }
+          activeSession.responseLogCount++;
         }
         server.send(response, rinfo.port, rinfo.address, (err: Error | null) => {
           if (err) console.error('[UDP] Error sending back to client', err.message);
@@ -660,6 +730,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         logged: false,
         destHostResolved: undefined,
         activeTargetIndex: 0,
+        requestLogCount: 0,
+        responseLogCount: 0,
       };
       sessions.set(key, session);
 
@@ -700,6 +772,13 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : err);
     }
 
+    if (session.requestLogCount < 3) {
+      console.log(chalk.gray(`[UDP] Client -> target datagram ${getBufferPreview(actualPayload)}`));
+    } else if (session.requestLogCount === 3) {
+      console.log(chalk.gray(`[UDP] Additional client->target datagram logs suppressed for ${originalIP}:${originalPort}`));
+    }
+    session.requestLogCount++;
+
 
     const trySendUdp = async (targetIndex: number) => {
       const target = udpTargets[targetIndex];
@@ -724,6 +803,7 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           const header = generateProxyProtocolV2Header(originalIP, originalPort, session!.destHostResolved ?? target.host, target.udp!, true /* dgram */);
           payload = Buffer.concat([header, actualPayload]);
           session!.headerSent = true;
+          console.log(chalk.gray(`[UDP] PROXY header preview ${getBufferPreview(header)}`));
         } catch (err) {
           console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
         }
