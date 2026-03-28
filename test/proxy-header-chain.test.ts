@@ -1,7 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import { rewriteBedrockUnconnectedPongPorts } from '../services/bedrockPong.js';
+import { normalizeBedrockUnconnectedPong, rewriteBedrockUnconnectedPongPorts } from '../services/bedrockPong.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
-import { isRakNetSessionStartPacket } from '../services/raknetPacket.js';
+import {
+  describeRakNetPacket,
+  getRakNetPacketKind,
+  getRakNetSessionPacketKind,
+  getRakNetSessionStage,
+  isRakNetSessionStartPacket,
+} from '../services/raknetPacket.js';
 import { buildUdpForwardPayload } from '../services/udpProxyForwarding.js';
 import { getOriginalClientFromHeaders, getOriginalDestinationFromHeaders, parseProxyV2Chain } from '../services/proxyProtocolParser.js';
 
@@ -121,6 +127,46 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(isRakNetSessionStartPacket(unconnectedPing)).toBe(true);
     expect(isRakNetSessionStartPacket(openConnectionRequest1)).toBe(true);
     expect(isRakNetSessionStartPacket(regularConnectedPacket)).toBe(false);
+    expect(getRakNetSessionPacketKind(unconnectedPing)).toBe('offline_ping');
+    expect(getRakNetSessionPacketKind(openConnectionRequest1)).toBe('open_connection');
+    expect(getRakNetSessionPacketKind(regularConnectedPacket)).toBe('other');
+  });
+
+  test('classifies RakNet packets into readable kinds and stages', () => {
+    const magic = Buffer.from([
+      0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
+      0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78,
+    ]);
+
+    const offlinePing = Buffer.concat([
+      Buffer.from([0x01]),
+      Buffer.alloc(8, 0x11),
+      magic,
+      Buffer.alloc(8, 0x22),
+    ]);
+    const openConnectionReply1 = Buffer.concat([
+      Buffer.from([0x06]),
+      magic,
+      Buffer.alloc(11, 0x00),
+    ]);
+    const disconnectNotification = Buffer.from([0x15]);
+    const frameSet = Buffer.concat([
+      Buffer.from([0x84]),
+      Buffer.alloc(10, 0x00),
+    ]);
+
+    expect(getRakNetPacketKind(offlinePing)).toBe('offline_ping');
+    expect(getRakNetSessionStage(getRakNetPacketKind(offlinePing))).toBe('discovery');
+    expect(describeRakNetPacket(offlinePing)).toContain('Unconnected Ping');
+
+    expect(getRakNetPacketKind(openConnectionReply1)).toBe('open_connection_reply_1');
+    expect(getRakNetSessionStage(getRakNetPacketKind(openConnectionReply1))).toBe('opening');
+
+    expect(getRakNetPacketKind(disconnectNotification)).toBe('disconnect_notification');
+    expect(getRakNetSessionStage(getRakNetPacketKind(disconnectNotification))).toBe('disconnecting');
+
+    expect(getRakNetPacketKind(frameSet)).toBe('frame_set');
+    expect(getRakNetSessionStage(getRakNetPacketKind(frameSet))).toBe('connected');
   });
 
   test('rewrites Bedrock unconnected pong advertised ports to the listener port', () => {
@@ -145,5 +191,30 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(rewritten.rewritten).toBe(true);
     expect(rewritten.originalPorts).toEqual({ ipv4: 5000, ipv6: 5001 });
     expect(rewrittenMotd.includes(';25565;25565;')).toBe(true);
+  });
+
+  test('normalizes Bedrock unconnected pong MOTD text for client compatibility', () => {
+    const motd = 'MCPE;\u00a7r\u00a79Fancy Server v1.21.11;944;26.10;0;2025;123456789;\u00a7fJoin now \u2014 \u00a7a0/2025;Survival;1;5000;5000;';
+    const pong = Buffer.concat([
+      Buffer.from([0x1c]),
+      Buffer.alloc(8, 0x11),
+      Buffer.alloc(8, 0x22),
+      Buffer.from([
+        0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
+        0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78,
+      ]),
+      Buffer.from([0x00, Buffer.byteLength(motd)]),
+      Buffer.from(motd, 'utf8'),
+    ]);
+
+    const normalized = normalizeBedrockUnconnectedPong(pong, 25565);
+    const normalizedLength = normalized.payload.readUInt16BE(33);
+    const normalizedMotd = normalized.payload.subarray(35, 35 + normalizedLength).toString('utf8');
+
+    expect(normalized.rewritten).toBe(true);
+    expect(normalizedMotd.includes('Fancy Server v1.21.11')).toBe(true);
+    expect(normalizedMotd.includes(';26.10;')).toBe(true);
+    expect(normalizedMotd.includes('Join now - 0/2025')).toBe(true);
+    expect(normalizedMotd.includes(';25565;25565;')).toBe(true);
   });
 });

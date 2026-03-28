@@ -40,6 +40,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     let targetToClientBlocked = false;
     let prefaceSent = false;
     let prefaceBuffer: Buffer | null = null;
+    let prefacePayloadBytes = 0;
     let clientChunkLogCount = 0;
     let serverChunkLogCount = 0;
     const pendingClientChunks: Buffer[] = [];
@@ -125,6 +126,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       if (!prefaceSent) {
         if (prefaceBuffer) {
           const flushed = destSocket.write(prefaceBuffer);
+          clientToServerBytes += prefacePayloadBytes;
+          prefacePayloadBytes = 0;
           prefaceSent = true;
           if (!flushed) {
             clientToTargetBlocked = true;
@@ -216,8 +219,11 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     };
 
     const preparePreface = async (target: ProxyTarget) => {
+      const bufferedBeforeConnect = pendingClientChunks.splice(0, pendingClientChunks.length);
+      prefacePayloadBytes = bufferedBeforeConnect.reduce((sum, chunk) => sum + chunk.length, 0);
+
       if (!rule.haproxy) {
-        prefaceBuffer = null;
+        prefaceBuffer = bufferedBeforeConnect.length > 0 ? Buffer.concat(bufferedBeforeConnect) : null;
         return;
       }
 
@@ -237,9 +243,12 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         );
       }
 
-      prefaceBuffer = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
-      console.log(chalk.blue(`[TCP] Sending PROXY header (${prefaceBuffer.length} bytes) to ${destIP}:${destPort}`));
-      console.log(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(prefaceBuffer)}`));
+      const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
+      console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
+      console.log(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(header)}`));
+      prefaceBuffer = bufferedBeforeConnect.length > 0
+        ? Buffer.concat([header, ...bufferedBeforeConnect])
+        : header;
     };
 
     const connectToTarget = (targetIndex: number) => {
@@ -301,8 +310,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
         try {
           await preparePreface(activeTarget);
-          if (pendingClientChunks.length > 0) {
-            console.log(chalk.dim(`[TCP] Forwarding initial data (${pendingClientChunks.reduce((sum, chunk) => sum + chunk.length, 0)} bytes buffered)`));
+          if (prefacePayloadBytes > 0) {
+            console.log(chalk.dim(`[TCP] Forwarding initial data (${prefacePayloadBytes} bytes buffered)`));
           }
           flushClientToTarget();
           console.log(chalk.gray(`[TCP] Client -> target pump armed for ${clientAddr}`));

@@ -6,37 +6,74 @@ const RAKNET_OFFLINE_MESSAGE_ID = Buffer.from([
 const UNCONNECTED_PONG_ID = 0x1c;
 const UNCONNECTED_PONG_STRING_OFFSET = 35;
 
-export function rewriteBedrockUnconnectedPongPorts(
-  payload: Buffer,
-  listenerPort: number
-): { payload: Buffer; rewritten: boolean; originalPorts?: { ipv4?: number; ipv6?: number } } {
+type ParsedBedrockPong = {
+  motd: string;
+  parts: string[];
+  stringEnd: number;
+};
+
+function parseBedrockUnconnectedPong(payload: Buffer): ParsedBedrockPong | null {
   if (payload.length < UNCONNECTED_PONG_STRING_OFFSET) {
-    return { payload, rewritten: false };
+    return null;
   }
 
   if (payload[0] !== UNCONNECTED_PONG_ID) {
-    return { payload, rewritten: false };
+    return null;
   }
 
   if (!payload.subarray(17, 33).equals(RAKNET_OFFLINE_MESSAGE_ID)) {
-    return { payload, rewritten: false };
+    return null;
   }
 
   const stringLength = payload.readUInt16BE(33);
   const stringEnd = UNCONNECTED_PONG_STRING_OFFSET + stringLength;
   if (payload.length < stringEnd) {
-    return { payload, rewritten: false };
+    return null;
   }
 
   const motd = payload.subarray(UNCONNECTED_PONG_STRING_OFFSET, stringEnd).toString('utf8');
   const parts = motd.split(';');
   if (parts.length < 12) {
+    return null;
+  }
+
+  return { motd, parts, stringEnd };
+}
+
+function normalizeMotdText(text: string, maxLength: number) {
+  const withoutFormatting = text.replace(/\u00a7./g, '');
+  const withAsciiDash = withoutFormatting.replace(/\u2014/g, '-');
+  const withoutSymbols = withAsciiDash.replace(/[^\x20-\x7e]/g, '');
+  const collapsed = withoutSymbols.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= maxLength) {
+    return collapsed;
+  }
+
+  return collapsed.slice(0, maxLength).trim();
+}
+
+export function normalizeBedrockUnconnectedPong(
+  payload: Buffer,
+  listenerPort: number
+): {
+  payload: Buffer;
+  rewritten: boolean;
+  originalPorts?: { ipv4?: number; ipv6?: number };
+  originalMotd?: string;
+  normalizedMotd?: string;
+} {
+  const parsed = parseBedrockUnconnectedPong(payload);
+  if (!parsed) {
     return { payload, rewritten: false };
   }
 
+  const { motd, parts, stringEnd } = parsed;
   const originalIpv4 = Number(parts[10]);
   const originalIpv6 = Number(parts[11]);
   const nextParts = [...parts];
+  nextParts[1] = normalizeMotdText(parts[1], 64) || 'Bedrock Server';
+  nextParts[3] = parts[3];
+  nextParts[7] = normalizeMotdText(parts[7], 64);
   nextParts[10] = String(listenerPort);
   nextParts[11] = String(listenerPort);
 
@@ -49,6 +86,8 @@ export function rewriteBedrockUnconnectedPongPorts(
         ipv4: Number.isFinite(originalIpv4) ? originalIpv4 : undefined,
         ipv6: Number.isFinite(originalIpv6) ? originalIpv6 : undefined,
       },
+      originalMotd: motd,
+      normalizedMotd: motd,
     };
   }
 
@@ -68,5 +107,19 @@ export function rewriteBedrockUnconnectedPongPorts(
       ipv4: Number.isFinite(originalIpv4) ? originalIpv4 : undefined,
       ipv6: Number.isFinite(originalIpv6) ? originalIpv6 : undefined,
     },
+    originalMotd: motd,
+    normalizedMotd: rewrittenMotd,
+  };
+}
+
+export function rewriteBedrockUnconnectedPongPorts(
+  payload: Buffer,
+  listenerPort: number
+): { payload: Buffer; rewritten: boolean; originalPorts?: { ipv4?: number; ipv6?: number } } {
+  const normalized = normalizeBedrockUnconnectedPong(payload, listenerPort);
+  return {
+    payload: normalized.payload,
+    rewritten: normalized.rewritten,
+    originalPorts: normalized.originalPorts,
   };
 }

@@ -10,6 +10,13 @@ import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
 import { parseProxyV2Chain } from './proxyProtocolParser.js';
+import {
+  describeRakNetPacket,
+  getRakNetPacketKind,
+  getRakNetSessionPacketKind,
+  getRakNetSessionStage,
+  type RakNetSessionStage,
+} from './raknetPacket.js';
 import type { ListenerRule } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
@@ -27,6 +34,7 @@ type UdpSession = {
   activeTargetIndex: number;
   requestLogCount: number;
   responseLogCount: number;
+  stage: RakNetSessionStage;
   timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -44,6 +52,19 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
   const server = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
   const sessions = new Map<string, UdpSession>();
+
+  const updateSessionStage = (
+    session: UdpSession,
+    nextStage: RakNetSessionStage,
+    reason: string,
+  ) => {
+    if (nextStage === 'other' || session.stage === nextStage) {
+      return;
+    }
+
+    console.log(chalk.cyan(`[UDP] Session stage ${session.stage} -> ${nextStage} for ${session.clientAddress}:${session.clientPort} (${reason})`));
+    session.stage = nextStage;
+  };
 
   const refreshSessionTimer = (key: string, session: UdpSession) => {
     if (session.timer) {
@@ -72,7 +93,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       session.destSocket.close();
       sessions.delete(key);
       runtime.connectionStats.udp.active--;
-      console.log(chalk.dim(`[UDP] Session timeout ${session.clientAddress}:${session.clientPort} (idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms)`));
+      console.log(chalk.dim(`[UDP] Session timeout ${session.clientAddress}:${session.clientPort} (stage=${session.stage}, idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms)`));
     }, UDP_SESSION_IDLE_TIMEOUT_MS);
   };
 
@@ -93,6 +114,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       activeTargetIndex: 0,
       requestLogCount: 0,
       responseLogCount: 0,
+      stage: 'other',
     };
 
     destSocket.on('message', (response, destInfo) => {
@@ -102,17 +124,36 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
 
       refreshSessionTimer(key, activeSession);
+      let responsePayload: Buffer = Buffer.from(response);
+
+      try {
+        const chain = parseProxyV2Chain(responsePayload);
+        if (chain.headers.length > 0) {
+          responsePayload = Buffer.from(chain.payload);
+          console.log(chalk.gray(`[UDP] Stripped backend PROXY header for ${activeSession.clientAddress}:${activeSession.clientPort}`));
+        }
+      } catch {
+        // Treat as raw RakNet payload.
+      }
+
+      const responseKind = getRakNetPacketKind(responsePayload);
+      const responseStage = getRakNetSessionStage(responseKind);
+      updateSessionStage(activeSession, responseStage, `server ${describeRakNetPacket(responsePayload)}`);
+
       if (activeSession.responseLogCount < 3) {
-        console.log(chalk.gray(`[UDP] Target -> client datagram from ${destInfo.address}:${destInfo.port} ${getBufferPreview(response)}`));
+        console.log(chalk.gray(`[UDP] Target -> client ${describeRakNetPacket(responsePayload)} from ${destInfo.address}:${destInfo.port} ${getBufferPreview(responsePayload)}`));
       } else if (activeSession.responseLogCount === 3) {
         console.log(chalk.gray(`[UDP] Additional target->client datagram logs suppressed for ${activeSession.clientAddress}:${activeSession.clientPort}`));
       }
       activeSession.responseLogCount++;
 
-      server.send(response, clientPort, clientAddress, (err) => {
+      server.send(responsePayload, clientPort, clientAddress, (err) => {
         if (err) {
           console.error('[UDP] Error sending back to client', err.message);
+          return;
         }
+
+        console.log(chalk.gray(`[UDP] Sent ${responsePayload.length}B back to client ${clientAddress}:${clientPort}`));
       });
     });
 
@@ -169,12 +210,21 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : String(err));
     }
 
+    const rakNetPacket = getRakNetPacketKind(actualPayload);
+    updateSessionStage(session, getRakNetSessionStage(rakNetPacket), `client ${describeRakNetPacket(actualPayload)}`);
+
     if (session.requestLogCount < 3) {
-      console.log(chalk.gray(`[UDP] Client -> target datagram ${getBufferPreview(actualPayload)}`));
+      console.log(chalk.gray(`[UDP] Client -> target ${describeRakNetPacket(actualPayload)} ${getBufferPreview(actualPayload)}`));
     } else if (session.requestLogCount === 3) {
       console.log(chalk.gray(`[UDP] Additional client->target datagram logs suppressed for ${originalIP}:${originalPort}`));
     }
     session.requestLogCount++;
+
+    const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
+    const forceProxyHeader = rule.haproxy && rakNetPacketKind === 'offline_ping';
+    if (forceProxyHeader) {
+      console.log(chalk.gray(`[UDP] RakNet offline ping detected for ${originalIP}:${originalPort}; PROXY header will be resent`));
+    }
 
     const trySendUdp = async (targetIndex: number): Promise<void> => {
       const target = udpTargets[targetIndex];
@@ -196,7 +246,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
 
       let payload = actualPayload;
-      if (rule.haproxy && !session!.headerSent) {
+      if (rule.haproxy && (forceProxyHeader || !session!.headerSent)) {
         try {
           const header = generateProxyProtocolV2Header(
             originalIP,
@@ -206,7 +256,9 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
             true,
           );
           payload = Buffer.concat([header, actualPayload]);
-          session!.headerSent = true;
+          if (rakNetPacketKind !== 'offline_ping') {
+            session!.headerSent = true;
+          }
           console.log(chalk.gray(`[UDP] PROXY header preview ${getBufferPreview(header)}`));
         } catch (err) {
           console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
