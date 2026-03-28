@@ -5,6 +5,7 @@ import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
 import { rewriteBedrockUnconnectedPongPorts } from './services/bedrockPong.js';
 import { buildUdpForwardPayload } from './services/udpProxyForwarding.js';
+import { isMinecraftJavaStatusPing } from './services/minecraftJavaStatus.js';
 import { parseProxyV2Chain, getOriginalClientFromHeaders, getOriginalDestinationFromHeaders } from './services/proxyProtocolParser.js';
 import { isRakNetSessionStartPacket } from './services/raknetPacket.js';
 import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
@@ -327,6 +328,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
   }
   const CONNECT_TIMEOUT_MS = 10_000;
   const INITIAL_PROXY_METADATA_WAIT_MS = 250;
+  const HALF_CLOSE_GRACE_MS = 1_000;
   const bindAddr = rule.bind || '0.0.0.0';
   const server = net.createServer((clientSocket: net.Socket) => {
     connectionStats.tcp.total++;
@@ -360,6 +362,11 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let pendingClientChunks: Buffer[] = [];
     let outboundStartTimer: ReturnType<typeof setTimeout> | null = null;
     let startForwardingRef: (() => void) | null = null;
+    let gracefulCloseTimer: ReturnType<typeof setTimeout> | null = null;
+    let clientClosed = false;
+    let destClosed = false;
+    let clientEnded = false;
+    let destEnded = false;
 
     const clearOutboundStartTimer = () => {
       if (outboundStartTimer) {
@@ -368,25 +375,60 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       }
     };
 
-    // クリーンアップ関数
-    const cleanup = () => {
+    const clearGracefulCloseTimer = () => {
+      if (gracefulCloseTimer) {
+        clearTimeout(gracefulCloseTimer);
+        gracefulCloseTimer = null;
+      }
+    };
+
+    const finalizeConnection = (failed = !destConnected) => {
       if (isClosed) return;
       isClosed = true;
       connectionStats.tcp.active--;
       clearOutboundStartTimer();
-      
+      clearGracefulCloseTimer();
+
+      if (failed) {
+        console.log(chalk.red(`[TCP] Connection failed ${clientAddr} => ${targetStr}`));
+      } else {
+        console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
+      }
+    };
+
+    // クリーンアップ関数
+    const cleanup = () => {
+      if (isClosed) return;
       if (destSocket && !destSocket.destroyed) {
         destSocket.destroy();
       }
       if (!clientSocket.destroyed) {
         clientSocket.destroy();
       }
-      
-      if (destConnected) {
-        console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
-      } else {
-        console.log(chalk.red(`[TCP] Connection failed ${clientAddr} => ${targetStr}`));
+      finalizeConnection();
+    };
+
+    const maybeFinalizeGracefully = () => {
+      if (isClosed) {
+        return;
       }
+
+      if (clientClosed && (!destSocket || destClosed)) {
+        finalizeConnection(false);
+      }
+    };
+
+    const scheduleGracefulCleanup = () => {
+      if (isClosed || gracefulCloseTimer) {
+        return;
+      }
+
+      gracefulCloseTimer = setTimeout(() => {
+        gracefulCloseTimer = null;
+        if (!isClosed && (clientClosed || destClosed)) {
+          cleanup();
+        }
+      }, HALF_CLOSE_GRACE_MS);
     };
 
     console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => formatHostPort(target.host, target.tcp)).join(' -> ')}`));
@@ -664,25 +706,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
           try {
             if (rule.haproxy) {
-              const advertisedDestIP = normalizeIPAddress(proxyDestIP || resolvedTarget.address);
-              const advertisedDestPort = proxyDestPort || activeTarget.tcp || 0;
-              const header = generateProxyProtocolV2Header(
-                proxyIP,
-                proxyPort,
-                advertisedDestIP,
-                advertisedDestPort,
-                false
-              );
-              console.log(
-                chalk.blue(
-                  `[TCP] Sending PROXY header (${header.length} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
-                )
-              );
               const initialPayload = drainPendingClientData();
-              const firstWrite = initialPayload
-                ? Buffer.concat([header, initialPayload])
-                : header;
-
+              const isStatusPing = isMinecraftJavaStatusPing(initialPayload);
               if (initialPayload && !loggedBufferedForward) {
                 console.log(chalk.dim(`[TCP] Forwarding buffered client data (${initialPayload.length} bytes)`));
                 loggedBufferedForward = true;
@@ -690,6 +715,33 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
               if (initialPayload) {
                 clientToServerBytes += initialPayload.length;
+              }
+
+              if (isStatusPing) {
+                console.log(chalk.yellow(`[TCP] Detected Minecraft Java status ping for ${clientAddr}; skipping PROXY header for compatibility`));
+              }
+
+              const advertisedDestIP = normalizeIPAddress(proxyDestIP || resolvedTarget.address);
+              const advertisedDestPort = proxyDestPort || activeTarget.tcp || 0;
+              const firstWrite = isStatusPing
+                ? (initialPayload ?? Buffer.alloc(0))
+                : Buffer.concat([
+                    generateProxyProtocolV2Header(
+                      proxyIP,
+                      proxyPort,
+                      advertisedDestIP,
+                      advertisedDestPort,
+                      false
+                    ),
+                    initialPayload ?? Buffer.alloc(0),
+                  ]);
+
+              if (!isStatusPing) {
+                console.log(
+                  chalk.blue(
+                    `[TCP] Sending PROXY header (${firstWrite.length - (initialPayload?.length ?? 0)} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
+                  )
+                );
               }
 
               destSocket.write(firstWrite, (err) => {
@@ -762,7 +814,16 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           cleanup();
         });
 
+        currentSocket.on('end', () => {
+          destEnded = true;
+          if (!clientEnded && !clientSocket.destroyed) {
+            clientSocket.end();
+          }
+          scheduleGracefulCleanup();
+        });
+
         currentSocket.on('close', () => {
+          destClosed = true;
           clearTimeout(connectTimer);
           if (!settled && !destConnected) {
             moveToNextTarget('Destination socket closed before connect');
@@ -770,7 +831,11 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           }
           if (!isClosed) {
             console.log(chalk.dim(`[TCP] Destination socket closed ${attemptTargetStr}`));
-            cleanup();
+            if (!clientEnded && !clientSocket.destroyed) {
+              clientSocket.end();
+            }
+            maybeFinalizeGracefully();
+            scheduleGracefulCleanup();
           }
         });
       };
@@ -791,11 +856,25 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       console.error(chalk.red('[TCP] Client socket timeout'));
       cleanup();
     });
+
+    clientSocket.on('end', () => {
+      clientEnded = true;
+      clearOutboundStartTimer();
+      if (destSocket && !destEnded && !destSocket.destroyed) {
+        destSocket.end();
+      }
+      scheduleGracefulCleanup();
+    });
     
     clientSocket.on('close', () => {
+      clientClosed = true;
       clearOutboundStartTimer();
       if (!isClosed) {
-        cleanup();
+        if (destSocket && !destEnded && !destSocket.destroyed) {
+          destSocket.end();
+        }
+        maybeFinalizeGracefully();
+        scheduleGracefulCleanup();
       }
     });
   });
