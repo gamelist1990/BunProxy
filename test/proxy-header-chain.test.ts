@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test';
 import { rewriteBedrockUnconnectedPongPorts } from '../services/bedrockPong.js';
-import { isMinecraftJavaStatusPing } from '../services/minecraftJavaStatus.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
 import { isRakNetSessionStartPacket } from '../services/raknetPacket.js';
 import { buildUdpForwardPayload } from '../services/udpProxyForwarding.js';
@@ -122,33 +121,6 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(isRakNetSessionStartPacket(unconnectedPing)).toBe(true);
     expect(isRakNetSessionStartPacket(openConnectionRequest1)).toBe(true);
     expect(isRakNetSessionStartPacket(regularConnectedPacket)).toBe(false);
-  });
-
-  test('detects Minecraft Java status ping handshakes but not login handshakes', () => {
-    const statusHandshake = Buffer.from([
-      0x10,
-      0x00,
-      0xfb, 0x05,
-      0x09,
-      0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x68, 0x6f, 0x73, 0x74,
-      0x63, 0xdd,
-      0x01,
-      0x01,
-      0x00,
-    ]);
-
-    const loginHandshake = Buffer.from([
-      0x0f,
-      0x00,
-      0xfb, 0x05,
-      0x09,
-      0x6c, 0x6f, 0x63, 0x61, 0x6c, 0x68, 0x6f, 0x73, 0x74,
-      0x63, 0xdd,
-      0x02,
-    ]);
-
-    expect(isMinecraftJavaStatusPing(statusHandshake)).toBe(true);
-    expect(isMinecraftJavaStatusPing(loginHandshake)).toBe(false);
   });
 
   test('rewrites Bedrock unconnected pong advertised ports to the listener port', () => {
