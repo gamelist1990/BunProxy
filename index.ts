@@ -331,20 +331,36 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         }
       }
 
-      const setupPiping = () => {
-        // データのパイプ設定
+      let serverToClientPipeEstablished = false;
+      let clientToServerPipeEstablished = false;
+      const maybeLogPipingEstablished = () => {
+        if (serverToClientPipeEstablished && clientToServerPipeEstablished) {
+          console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+        }
+      };
+
+      const setupServerToClientPiping = (socket: net.Socket) => {
+        if (serverToClientPipeEstablished) return;
+        serverToClientPipeEstablished = true;
+
+        socket.on('data', (chunk) => {
+          serverToClientBytes += chunk.length;
+        });
+
+        socket.pipe(clientSocket);
+        maybeLogPipingEstablished();
+      };
+
+      const setupClientToServerPiping = (socket: net.Socket) => {
+        if (clientToServerPipeEstablished) return;
+        clientToServerPipeEstablished = true;
+
         clientSocket.on('data', (chunk) => {
           clientToServerBytes += chunk.length;
         });
-        
-        destSocket!.on('data', (chunk) => {
-          serverToClientBytes += chunk.length;
-        });
-        
-        clientSocket.pipe(destSocket!);
-        destSocket!.pipe(clientSocket);
-        
-        console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+
+        clientSocket.pipe(socket);
+        maybeLogPipingEstablished();
       };
 
       const connectToTarget = (targetIndex: number) => {
@@ -401,6 +417,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           destConnected = true;
           currentSocket.setTimeout(0);
           console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
+          setupServerToClientPiping(currentSocket);
 
           try {
             if (rule.haproxy) {
@@ -429,29 +446,31 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
                 if (firstChunk) {
                   console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
+                  clientToServerBytes += firstChunk.length;
                   currentSocket.write(firstChunk, (writeErr) => {
                     if (writeErr) {
                       console.error(chalk.red('[TCP] Failed to write initial data:'), writeErr.message);
                       cleanup();
                       return;
                     }
-                    setupPiping();
+                    setupClientToServerPiping(currentSocket);
                   });
                 } else {
-                  setupPiping();
+                  setupClientToServerPiping(currentSocket);
                 }
               });
             } else if (firstChunk) {
+              clientToServerBytes += firstChunk.length;
               currentSocket.write(firstChunk, (err) => {
                 if (err) {
                   console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
                   cleanup();
                   return;
                 }
-                setupPiping();
+                setupClientToServerPiping(currentSocket);
               });
             } else {
-              setupPiping();
+              setupClientToServerPiping(currentSocket);
             }
 
             if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
