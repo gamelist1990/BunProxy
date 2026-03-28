@@ -347,8 +347,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let firstChunk: Buffer | null = null;
     let proxyIP = originalIP;
     let proxyPort = originalPort;
-    let proxyDestIP = normalizeIPAddress(clientSocket.localAddress || rule.bind || '0.0.0.0');
-    let proxyDestPort = clientSocket.localPort || rule.tcp || 0;
+    let proxyDestIP: string | null = null;
+    let proxyDestPort = 0;
     let destConnected = false;
     let destSocket: net.Socket | null = null;
     let initialDataHandled = false;
@@ -664,8 +664,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
           try {
             if (rule.haproxy) {
-              const advertisedDestIP = normalizeIPAddress(proxyDestIP || clientSocket.localAddress || rule.bind || '0.0.0.0');
-              const advertisedDestPort = proxyDestPort || clientSocket.localPort || rule.tcp || 0;
+              const advertisedDestIP = normalizeIPAddress(proxyDestIP || resolvedTarget.address);
+              const advertisedDestPort = proxyDestPort || activeTarget.tcp || 0;
               const header = generateProxyProtocolV2Header(
                 proxyIP,
                 proxyPort,
@@ -1045,16 +1045,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
-    const boundAddress = server.address();
-    let originalDestIP = normalizeIPAddress(
-      typeof boundAddress === 'string'
-        ? bindAddr
-        : boundAddress?.address || bindAddr || '0.0.0.0'
-    );
-    let originalDestPort =
-      (typeof boundAddress === 'string' ? rule.udp : boundAddress?.port) ||
-      rule.udp ||
-      0;
+    let originalDestIP: string | undefined;
+    let originalDestPort: number | undefined;
     let actualPayload = msg;
     const activeTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
     try {
@@ -1132,15 +1124,15 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
               actualPayload,
               originalIP,
               originalPort,
-              session!.originalDestIP || normalizeIPAddress(bindAddr || '0.0.0.0'),
-              session!.originalDestPort || rule.udp!
+              session!.originalDestIP || resolvedTarget.address,
+              session!.originalDestPort || target.udp!
             );
             session!.headerSent = true;
             console.log(
               chalk.blue(
                 `[UDP] Sending PROXY header src=${formatHostPort(originalIP, originalPort)} dst=${formatHostPort(
-                  session!.originalDestIP || normalizeIPAddress(bindAddr || '0.0.0.0'),
-                  session!.originalDestPort || rule.udp
+                  session!.originalDestIP || resolvedTarget.address,
+                  session!.originalDestPort || target.udp
                 )}`
               )
             );
