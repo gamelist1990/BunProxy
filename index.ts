@@ -718,31 +718,28 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
               }
 
               if (isStatusPing) {
-                console.log(chalk.yellow(`[TCP] Detected Minecraft Java status ping for ${clientAddr}; skipping PROXY header for compatibility`));
+                console.log(chalk.yellow(`[TCP] Detected Minecraft Java status ping for ${clientAddr}; forwarding with PROXY header`));
               }
 
               const advertisedDestIP = normalizeIPAddress(proxyDestIP || resolvedTarget.address);
               const advertisedDestPort = proxyDestPort || activeTarget.tcp || 0;
-              const firstWrite = isStatusPing
-                ? (initialPayload ?? Buffer.alloc(0))
-                : Buffer.concat([
-                    generateProxyProtocolV2Header(
-                      proxyIP,
-                      proxyPort,
-                      advertisedDestIP,
-                      advertisedDestPort,
-                      false
-                    ),
-                    initialPayload ?? Buffer.alloc(0),
-                  ]);
+              const header = generateProxyProtocolV2Header(
+                proxyIP,
+                proxyPort,
+                advertisedDestIP,
+                advertisedDestPort,
+                false
+              );
+              const firstWrite = Buffer.concat([
+                header,
+                initialPayload ?? Buffer.alloc(0),
+              ]);
 
-              if (!isStatusPing) {
-                console.log(
-                  chalk.blue(
-                    `[TCP] Sending PROXY header (${firstWrite.length - (initialPayload?.length ?? 0)} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
-                  )
-                );
-              }
+              console.log(
+                chalk.blue(
+                  `[TCP] Sending PROXY header (${header.length} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
+                )
+              );
 
               destSocket.write(firstWrite, (err) => {
                 if (err) {
