@@ -55,31 +55,20 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(reparsed.payload.equals(payload)).toBe(true);
   });
 
-  test('UDP forwarding prepends a PROXY header to every datagram payload', () => {
-    const firstPayload = Buffer.from('query-one', 'utf8');
-    const secondPayload = Buffer.from('query-two', 'utf8');
+  test('UDP helper prepends a single PROXY header to a datagram payload', () => {
+    const payload = Buffer.from('query-one', 'utf8');
 
-    const firstDatagram = buildUdpForwardPayload(
-      firstPayload,
-      '175.130.34.175',
-      55280,
-      '132.145.123.39',
-      5000
-    );
-    const secondDatagram = buildUdpForwardPayload(
-      secondPayload,
+    const datagram = buildUdpForwardPayload(
+      payload,
       '175.130.34.175',
       55280,
       '132.145.123.39',
       5000
     );
 
-    const firstParsed = parseProxyV2Chain(firstDatagram);
-    const secondParsed = parseProxyV2Chain(secondDatagram);
+    const parsed = parseProxyV2Chain(datagram);
 
-    expect(firstParsed.headers).toHaveLength(1);
-    expect(secondParsed.headers).toHaveLength(1);
-    expect(firstParsed.payload.equals(firstPayload)).toBe(true);
-    expect(secondParsed.payload.equals(secondPayload)).toBe(true);
+    expect(parsed.headers).toHaveLength(1);
+    expect(parsed.payload.equals(payload)).toBe(true);
   });
 });
