@@ -412,6 +412,23 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       maybeLogPipingEstablished();
     };
 
+    const drainPendingClientData = (): Buffer | null => {
+      if (pendingClientChunks.length === 0) {
+        return null;
+      }
+
+      const nonEmptyChunks = pendingClientChunks.filter((chunk) => chunk.length > 0);
+      pendingClientChunks = [];
+
+      if (nonEmptyChunks.length === 0) {
+        return null;
+      }
+
+      return nonEmptyChunks.length === 1
+        ? nonEmptyChunks[0]
+        : Buffer.concat(nonEmptyChunks);
+    };
+
     const setupClientToServerPiping = () => {
       if (clientToServerPipeEstablished || !destSocket) {
         return;
@@ -480,7 +497,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           return;
         }
 
-        const chunk = pendingClientChunks.shift();
+        const chunk = drainPendingClientData();
         if (!chunk) {
           flushingPendingClientData = false;
           setupClientToServerPiping();
@@ -604,7 +621,9 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         });
         destSocket = currentSocket;
         currentSocket.setKeepAlive(true, 30_000);
+        currentSocket.setNoDelay(true);
         clientSocket.setKeepAlive(true, 30_000);
+        clientSocket.setNoDelay(true);
 
         let settled = false;
         const moveToNextTarget = (reason: string, err?: Error) => {
@@ -659,10 +678,23 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                   `[TCP] Sending PROXY header (${header.length} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
                 )
               );
+              const initialPayload = drainPendingClientData();
+              const firstWrite = initialPayload
+                ? Buffer.concat([header, initialPayload])
+                : header;
 
-              destSocket.write(header, (err) => {
+              if (initialPayload && !loggedBufferedForward) {
+                console.log(chalk.dim(`[TCP] Forwarding buffered client data (${initialPayload.length} bytes)`));
+                loggedBufferedForward = true;
+              }
+
+              if (initialPayload) {
+                clientToServerBytes += initialPayload.length;
+              }
+
+              destSocket.write(firstWrite, (err) => {
                 if (err) {
-                  console.error(chalk.red('[TCP] Failed to write PROXY header:'), err.message);
+                  console.error(chalk.red('[TCP] Failed to write initial PROXY payload:'), err.message);
                   cleanup();
                   return;
                 }
