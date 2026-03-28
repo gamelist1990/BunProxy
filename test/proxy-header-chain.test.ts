@@ -3,7 +3,7 @@ import { rewriteBedrockUnconnectedPongPorts } from '../services/bedrockPong.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
 import { isRakNetSessionStartPacket } from '../services/raknetPacket.js';
 import { buildUdpForwardPayload } from '../services/udpProxyForwarding.js';
-import { getOriginalClientFromHeaders, parseProxyV2Chain } from '../services/proxyProtocolParser.js';
+import { getOriginalClientFromHeaders, getOriginalDestinationFromHeaders, parseProxyV2Chain } from '../services/proxyProtocolParser.js';
 
 describe('TCP PROXY protocol forwarding', () => {
   test('strips incoming PROXY header chain before relaying payload', () => {
@@ -55,6 +55,27 @@ describe('TCP PROXY protocol forwarding', () => {
 
     expect(reparsed.headers).toHaveLength(1);
     expect(reparsed.payload.equals(payload)).toBe(true);
+  });
+
+  test('preserves original destination in parsed PROXY headers', () => {
+    const payload = Buffer.from('status-request', 'utf8');
+    const header = generateProxyProtocolV2Header(
+      '49.105.101.8',
+      49397,
+      '203.0.113.25',
+      25565,
+      false
+    );
+    const parsed = parseProxyV2Chain(Buffer.concat([header, payload]));
+
+    expect(getOriginalClientFromHeaders(parsed.headers)).toEqual({
+      ip: '49.105.101.8',
+      port: 49397,
+    });
+    expect(getOriginalDestinationFromHeaders(parsed.headers)).toEqual({
+      ip: '203.0.113.25',
+      port: 25565,
+    });
   });
 
   test('UDP helper prepends a single PROXY header to a datagram payload', () => {

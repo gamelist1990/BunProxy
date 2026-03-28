@@ -5,7 +5,7 @@ import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
 import { rewriteBedrockUnconnectedPongPorts } from './services/bedrockPong.js';
 import { buildUdpForwardPayload } from './services/udpProxyForwarding.js';
-import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
+import { parseProxyV2Chain, getOriginalClientFromHeaders, getOriginalDestinationFromHeaders } from './services/proxyProtocolParser.js';
 import { isRakNetSessionStartPacket } from './services/raknetPacket.js';
 import { TimestampPlayerMapper } from './services/timestampPlayerMapper.js';
 import { ConnectionBuffer } from './services/connectionBuffer.js';
@@ -347,6 +347,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let firstChunk: Buffer | null = null;
     let proxyIP = originalIP;
     let proxyPort = originalPort;
+    let proxyDestIP = normalizeIPAddress(clientSocket.localAddress || rule.bind || '0.0.0.0');
+    let proxyDestPort = clientSocket.localPort || rule.tcp || 0;
     let destConnected = false;
     let destSocket: net.Socket | null = null;
     let initialDataHandled = false;
@@ -435,9 +437,14 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           const chain = parseProxyV2Chain(buf);
           if (chain.headers.length > 0) {
             const orig = getOriginalClientFromHeaders(chain.headers);
+            const origDest = getOriginalDestinationFromHeaders(chain.headers);
             if (orig) {
               proxyIP = orig.ip || proxyIP;
               proxyPort = orig.port || proxyPort;
+            }
+            if (origDest) {
+              proxyDestIP = origDest.ip || proxyDestIP;
+              proxyDestPort = origDest.port || proxyDestPort;
             }
             firstChunk = chain.payload.length > 0 ? chain.payload : null;
             if (pendingClientChunks.length > 0) {
@@ -450,6 +457,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
             console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
               layers: chain.headers.length,
               original: `${proxyIP}:${proxyPort}`,
+              destination: `${proxyDestIP}:${proxyDestPort}`,
               payloadLength: chain.payload.length,
             });
           }
@@ -637,10 +645,20 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
           try {
             if (rule.haproxy) {
-              const destPort = activeTarget.tcp || 0;
-              const destIP = resolvedTarget.address;
-              const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
-              console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${formatHostPort(destIP, destPort)}`));
+              const advertisedDestIP = normalizeIPAddress(proxyDestIP || clientSocket.localAddress || rule.bind || '0.0.0.0');
+              const advertisedDestPort = proxyDestPort || clientSocket.localPort || rule.tcp || 0;
+              const header = generateProxyProtocolV2Header(
+                proxyIP,
+                proxyPort,
+                advertisedDestIP,
+                advertisedDestPort,
+                false
+              );
+              console.log(
+                chalk.blue(
+                  `[TCP] Sending PROXY header (${header.length} bytes) src=${formatHostPort(proxyIP, proxyPort)} dst=${formatHostPort(advertisedDestIP, advertisedDestPort)}`
+                )
+              );
 
               destSocket.write(header, (err) => {
                 if (err) {
@@ -790,6 +808,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
     responseTimer?: ReturnType<typeof setTimeout>;
     originalIP?: string;
     originalPort?: number;
+    originalDestIP?: string;
+    originalDestPort?: number;
     timer?: ReturnType<typeof setTimeout>;
   };
 
@@ -982,6 +1002,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
         responseTimer: undefined,
         originalIP: undefined,
         originalPort: undefined,
+        originalDestIP: undefined,
+        originalDestPort: undefined,
       };
       sessions.set(key, session);
     }
@@ -991,14 +1013,29 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
+    const boundAddress = server.address();
+    let originalDestIP = normalizeIPAddress(
+      typeof boundAddress === 'string'
+        ? bindAddr
+        : boundAddress?.address || bindAddr || '0.0.0.0'
+    );
+    let originalDestPort =
+      (typeof boundAddress === 'string' ? rule.udp : boundAddress?.port) ||
+      rule.udp ||
+      0;
     let actualPayload = msg;
     const activeTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
     try {
       const chain = parseProxyV2Chain(msg);
       if (chain.headers.length > 0) {
         const last = chain.headers[chain.headers.length - 1];
+        const originalDest = getOriginalDestinationFromHeaders(chain.headers);
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
+        if (originalDest) {
+          originalDestIP = originalDest.ip || originalDestIP;
+          originalDestPort = originalDest.port || originalDestPort;
+        }
         actualPayload = chain.payload;
         console.log(`[UDP] ${originalIP}:${originalPort} => ${formatHostPort(activeTarget.host, activeTarget.udp)} (payload=${actualPayload.length})`);
       }
@@ -1008,6 +1045,8 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     session.originalIP = originalIP;
     session.originalPort = originalPort;
+    session.originalDestIP = originalDestIP;
+    session.originalDestPort = originalDestPort;
 
     if (rule.haproxy && isRakNetSessionStartPacket(actualPayload)) {
       session.headerSent = false;
@@ -1061,10 +1100,18 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
               actualPayload,
               originalIP,
               originalPort,
-              resolvedTarget.address,
-              target.udp!
+              session!.originalDestIP || normalizeIPAddress(bindAddr || '0.0.0.0'),
+              session!.originalDestPort || rule.udp!
             );
             session!.headerSent = true;
+            console.log(
+              chalk.blue(
+                `[UDP] Sending PROXY header src=${formatHostPort(originalIP, originalPort)} dst=${formatHostPort(
+                  session!.originalDestIP || normalizeIPAddress(bindAddr || '0.0.0.0'),
+                  session!.originalDestPort || rule.udp
+                )}`
+              )
+            );
           }
 
           destSocket.send(payload, target.udp!, resolvedTarget.address, async (err: Error | null) => {

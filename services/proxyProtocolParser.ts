@@ -142,6 +142,15 @@ export function getOriginalClientFromHeaders(headers: ProxyV2Header[]): { ip: st
   return null;
 }
 
+export function getOriginalDestinationFromHeaders(headers: ProxyV2Header[]): { ip: string, port: number } | null {
+  if (!headers || headers.length === 0) return null;
+  const last = headers[headers.length - 1];
+  if (last && last.destAddress) {
+    return { ip: last.destAddress, port: last.destPort };
+  }
+  return null;
+}
+
 
 
 //Proxy Protocol v2 Support 
