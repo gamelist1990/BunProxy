@@ -8,6 +8,7 @@ import {
 } from './discordEmbed.js';
 import {
   inspectBedrockUnconnectedPong,
+  rewriteBedrockUnconnectedPongTimestamp,
   rewriteBedrockUnconnectedPongPorts,
 } from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
@@ -39,6 +40,7 @@ type UdpSession = {
   requestLogCount: number;
   responseLogCount: number;
   stage: RakNetSessionStage;
+  cachedOfflinePong?: Buffer;
   timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -119,6 +121,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       requestLogCount: 0,
       responseLogCount: 0,
       stage: 'other',
+      cachedOfflinePong: undefined,
     };
 
     destSocket.on('message', (response, destInfo) => {
@@ -154,6 +157,10 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       const responseKind = getRakNetPacketKind(responsePayload);
       const responseStage = getRakNetSessionStage(responseKind);
       updateSessionStage(activeSession, responseStage, `server ${describeRakNetPacket(responsePayload)}`);
+
+      if (responseKind === 'unconnected_pong') {
+        activeSession.cachedOfflinePong = Buffer.from(responsePayload);
+      }
 
       const inspectedPong = inspectBedrockUnconnectedPong(responsePayload);
       if (inspectedPong) {
@@ -245,6 +252,22 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     session.requestLogCount++;
 
     const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
+    if (rakNetPacketKind === 'offline_ping' && session.cachedOfflinePong && actualPayload.length >= 9) {
+      const cachedResponse = rewriteBedrockUnconnectedPongTimestamp(
+        session.cachedOfflinePong,
+        actualPayload.subarray(1, 9),
+      );
+      server.send(cachedResponse, rinfo.port, rinfo.address, (err) => {
+        if (err) {
+          console.error('[UDP] Error sending cached pong to client', err.message);
+          return;
+        }
+
+        console.log(chalk.green(`[UDP] ✓ Served cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
+      });
+      return;
+    }
+
     const forceProxyHeader = rule.haproxy && rakNetPacketKind === 'offline_ping';
     if (forceProxyHeader) {
       console.log(chalk.gray(`[UDP] RakNet offline ping detected for ${originalIP}:${originalPort}; PROXY header will be resent`));

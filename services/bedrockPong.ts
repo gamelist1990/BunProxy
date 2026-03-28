@@ -62,6 +62,19 @@ export function inspectBedrockUnconnectedPong(
   };
 }
 
+export function rewriteBedrockUnconnectedPongTimestamp(
+  payload: Buffer,
+  timestamp: Buffer,
+): Buffer {
+  if (payload.length < UNCONNECTED_PONG_STRING_OFFSET || payload[0] !== UNCONNECTED_PONG_ID || timestamp.length !== 8) {
+    return payload;
+  }
+
+  const rewritten = Buffer.from(payload);
+  timestamp.copy(rewritten, 1);
+  return rewritten;
+}
+
 function normalizeMotdText(text: string, maxLength: number) {
   const withoutFormatting = text.replace(/\u00a7./g, '');
   const withAsciiDash = withoutFormatting.replace(/\u2014/g, '-');

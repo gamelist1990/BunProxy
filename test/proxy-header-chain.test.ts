@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   inspectBedrockUnconnectedPong,
   normalizeBedrockUnconnectedPong,
+  rewriteBedrockUnconnectedPongTimestamp,
   rewriteBedrockUnconnectedPongPorts,
 } from '../services/bedrockPong.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
@@ -218,6 +219,29 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(inspected?.motd).toBe(motd);
     expect(inspected?.advertisedPortV4).toBe(5000);
     expect(inspected?.advertisedPortV6).toBe(5000);
+  });
+
+  test('rewrites Bedrock unconnected pong timestamp without changing MOTD payload', () => {
+    const motd = 'MCPE;PEXserver;944;26.10;0;2025;1757476976326314584;Join now;Survival;1;25565;25565;';
+    const payload = Buffer.concat([
+      Buffer.from([0x1c]),
+      Buffer.from([0, 1, 2, 3, 4, 5, 6, 7]),
+      Buffer.alloc(8, 0x22),
+      Buffer.from([
+        0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe,
+        0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78,
+      ]),
+      Buffer.from([0x00, Buffer.byteLength(motd)]),
+      Buffer.from(motd, 'utf8'),
+    ]);
+
+    const rewritten = rewriteBedrockUnconnectedPongTimestamp(
+      payload,
+      Buffer.from([9, 8, 7, 6, 5, 4, 3, 2]),
+    );
+
+    expect(rewritten.subarray(1, 9)).toEqual(Buffer.from([9, 8, 7, 6, 5, 4, 3, 2]));
+    expect(rewritten.subarray(35).toString('utf8')).toBe(motd);
   });
 
   test('normalizes Bedrock unconnected pong MOTD text for client compatibility', () => {
