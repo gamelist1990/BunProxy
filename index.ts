@@ -408,9 +408,11 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
               proxyIP = orig.ip || proxyIP;
               proxyPort = orig.port || proxyPort;
             }
+            firstChunk = chain.payload.length > 0 ? chain.payload : null;
             console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
               layers: chain.headers.length,
-              original: `${proxyIP}:${proxyPort}`
+              original: `${proxyIP}:${proxyPort}`,
+              payloadLength: chain.payload.length,
             });
           }
         } catch (err) {
@@ -557,7 +559,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                     return;
                   }
 
-                  if (firstChunk) {
+                  if (firstChunk && firstChunk.length > 0) {
                     console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
                     currentSocket.write(firstChunk, (err) => {
                       if (err) {
@@ -571,7 +573,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                     setupPiping();
                   }
                 });
-              } else if (firstChunk) {
+              } else if (firstChunk && firstChunk.length > 0) {
                 currentSocket.write(firstChunk, (err) => {
                   if (err) {
                     console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
