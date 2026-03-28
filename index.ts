@@ -357,7 +357,6 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let serverToClientPipeEstablished = false;
     let clientToServerPipeEstablished = false;
     let forwardingStarted = false;
-    let flushingPendingClientData = false;
     let loggedBufferedForward = false;
     let pendingClientChunks: Buffer[] = [];
     let outboundStartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -454,6 +453,54 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       maybeLogPipingEstablished();
     };
 
+    const markClientToServerReady = () => {
+      if (clientToServerPipeEstablished) {
+        return;
+      }
+
+      clientToServerPipeEstablished = true;
+      maybeLogPipingEstablished();
+    };
+
+    const writeClientChunkToDestination = (
+      chunk: Buffer,
+      description: string,
+      onWritten?: () => void,
+      options?: { countedBytes?: number; loggedBytes?: number }
+    ) => {
+      if (!destSocket || isClosed) {
+        return;
+      }
+
+      const countedBytes = options?.countedBytes ?? chunk.length;
+      const loggedBytes = options?.loggedBytes ?? countedBytes;
+
+      if (chunk.length === 0) {
+        onWritten?.();
+        return;
+      }
+
+      if (!loggedBufferedForward) {
+        console.log(chalk.dim(`[TCP] ${description} (${loggedBytes} bytes)`));
+        loggedBufferedForward = true;
+      }
+
+      clientToServerBytes += countedBytes;
+      const wroteImmediately = destSocket.write(chunk, (err) => {
+        if (err) {
+          console.error(chalk.red('[TCP] Failed to write client data:'), err.message);
+          cleanup();
+          return;
+        }
+
+        onWritten?.();
+      });
+
+      if (!wroteImmediately && !clientSocket.destroyed) {
+        clientSocket.pause();
+      }
+    };
+
     const drainPendingClientData = (): Buffer | null => {
       if (pendingClientChunks.length === 0) {
         return null;
@@ -469,22 +516,6 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       return nonEmptyChunks.length === 1
         ? nonEmptyChunks[0]
         : Buffer.concat(nonEmptyChunks);
-    };
-
-    const setupClientToServerPiping = () => {
-      if (clientToServerPipeEstablished || !destSocket) {
-        return;
-      }
-
-      clientToServerPipeEstablished = true;
-      clientSocket.off('data', handleBufferedClientData);
-
-      clientSocket.on('data', (chunk) => {
-        clientToServerBytes += chunk.length;
-      });
-
-      clientSocket.pipe(destSocket);
-      maybeLogPipingEstablished();
     };
 
     const processInitialData = (buf: Buffer) => {
@@ -526,53 +557,13 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       }
     };
 
-    const flushPendingClientData = () => {
-      if (flushingPendingClientData || !destSocket || isClosed) {
+    const handleBufferedClientData = (buf: Buffer) => {
+      if (isClosed) {
         return;
       }
 
-      flushingPendingClientData = true;
-
-      const writeNext = () => {
-        if (isClosed || !destSocket) {
-          flushingPendingClientData = false;
-          return;
-        }
-
-        const chunk = drainPendingClientData();
-        if (!chunk) {
-          flushingPendingClientData = false;
-          setupClientToServerPiping();
-          return;
-        }
-
-        if (chunk.length === 0) {
-          writeNext();
-          return;
-        }
-
-        if (!loggedBufferedForward) {
-          console.log(chalk.dim(`[TCP] Forwarding buffered client data (${chunk.length} bytes)`));
-          loggedBufferedForward = true;
-        }
-
-        clientToServerBytes += chunk.length;
-        destSocket.write(chunk, (err) => {
-          if (err) {
-            console.error(chalk.red('[TCP] Failed to write buffered client data:'), err.message);
-            cleanup();
-            return;
-          }
-
-          writeNext();
-        });
-      };
-
-      writeNext();
-    };
-
-    const handleBufferedClientData = (buf: Buffer) => {
-      if (clientToServerPipeEstablished || isClosed) {
+      if (forwardingStarted && destConnected && destSocket) {
+        writeClientChunkToDestination(buf, 'Forwarding live client data');
         return;
       }
 
@@ -708,15 +699,6 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
             if (rule.haproxy) {
               const initialPayload = drainPendingClientData();
               const isStatusPing = isMinecraftJavaStatusPing(initialPayload);
-              if (initialPayload && !loggedBufferedForward) {
-                console.log(chalk.dim(`[TCP] Forwarding buffered client data (${initialPayload.length} bytes)`));
-                loggedBufferedForward = true;
-              }
-
-              if (initialPayload) {
-                clientToServerBytes += initialPayload.length;
-              }
-
               if (isStatusPing) {
                 console.log(chalk.yellow(`[TCP] Detected Minecraft Java status ping for ${clientAddr}; forwarding with PROXY header`));
               }
@@ -741,17 +723,24 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                 )
               );
 
-              destSocket.write(firstWrite, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write initial PROXY payload:'), err.message);
-                  cleanup();
-                  return;
-                }
-
-                flushPendingClientData();
+              writeClientChunkToDestination(firstWrite, 'Forwarding buffered client data', () => {
+                markClientToServerReady();
+              }, {
+                countedBytes: initialPayload?.length ?? 0,
+                loggedBytes: initialPayload?.length ?? 0,
               });
             } else {
-              flushPendingClientData();
+              const initialPayload = drainPendingClientData();
+              if (initialPayload) {
+                writeClientChunkToDestination(initialPayload, 'Forwarding buffered client data', () => {
+                  markClientToServerReady();
+                }, {
+                  countedBytes: initialPayload.length,
+                  loggedBytes: initialPayload.length,
+                });
+              } else {
+                markClientToServerReady();
+              }
             }
 
             if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
@@ -809,6 +798,12 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           }
           console.error(chalk.red(`[TCP] ✗ Destination socket timeout ${attemptTargetStr}`));
           cleanup();
+        });
+
+        currentSocket.on('drain', () => {
+          if (!clientSocket.destroyed) {
+            clientSocket.resume();
+          }
         });
 
         currentSocket.on('end', () => {
