@@ -6,6 +6,7 @@ import {
   createPlayerLeaveEmbed,
   sendDiscordWebhookEmbed,
 } from './discordEmbed.js';
+import { inspectBedrockUnconnectedPong } from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
@@ -139,6 +140,15 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       const responseKind = getRakNetPacketKind(responsePayload);
       const responseStage = getRakNetSessionStage(responseKind);
       updateSessionStage(activeSession, responseStage, `server ${describeRakNetPacket(responsePayload)}`);
+
+      const inspectedPong = inspectBedrockUnconnectedPong(responsePayload);
+      if (inspectedPong) {
+        console.log(chalk.blue(
+          `[UDP] Bedrock pong fields for ${activeSession.clientAddress}:${activeSession.clientPort}: ` +
+          `ports=${inspectedPong.advertisedPortV4 ?? 'n/a'}/${inspectedPong.advertisedPortV6 ?? 'n/a'} ` +
+          `motd="${inspectedPong.motd}"`
+        ));
+      }
 
       if (activeSession.responseLogCount < 3) {
         console.log(chalk.gray(`[UDP] Target -> client ${describeRakNetPacket(responsePayload)} from ${destInfo.address}:${destInfo.port} ${getBufferPreview(responsePayload)}`));

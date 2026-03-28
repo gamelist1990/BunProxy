@@ -40,6 +40,28 @@ function parseBedrockUnconnectedPong(payload: Buffer): ParsedBedrockPong | null 
   return { motd, parts, stringEnd };
 }
 
+export function inspectBedrockUnconnectedPong(
+  payload: Buffer,
+): {
+  motd: string;
+  advertisedPortV4?: number;
+  advertisedPortV6?: number;
+} | null {
+  const parsed = parseBedrockUnconnectedPong(payload);
+  if (!parsed) {
+    return null;
+  }
+
+  const advertisedPortV4 = Number(parsed.parts[10]);
+  const advertisedPortV6 = Number(parsed.parts[11]);
+
+  return {
+    motd: parsed.motd,
+    advertisedPortV4: Number.isFinite(advertisedPortV4) ? advertisedPortV4 : undefined,
+    advertisedPortV6: Number.isFinite(advertisedPortV6) ? advertisedPortV6 : undefined,
+  };
+}
+
 function normalizeMotdText(text: string, maxLength: number) {
   const withoutFormatting = text.replace(/\u00a7./g, '');
   const withAsciiDash = withoutFormatting.replace(/\u2014/g, '-');
