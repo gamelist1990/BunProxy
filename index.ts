@@ -348,9 +348,13 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let destConnected = false;
     let destSocket: net.Socket | null = null;
     let initialDataHandled = false;
-    let initialDataPaused = false;
     let pipingEstablished = false;
+    let forwardingStarted = false;
+    let flushingPendingClientData = false;
+    let loggedBufferedForward = false;
+    let pendingClientChunks: Buffer[] = [];
     let outboundStartTimer: ReturnType<typeof setTimeout> | null = null;
+    let startForwardingRef: (() => void) | null = null;
 
     const clearOutboundStartTimer = () => {
       if (outboundStartTimer) {
@@ -388,7 +392,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       }
 
       pipingEstablished = true;
-      clientSocket.off('data', handleInitialData);
+      clientSocket.off('data', handleBufferedClientData);
 
       clientSocket.on('data', (chunk) => {
         clientToServerBytes += chunk.length;
@@ -400,11 +404,6 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       
       clientSocket.pipe(destSocket);
       destSocket.pipe(clientSocket);
-
-      if (initialDataPaused) {
-        initialDataPaused = false;
-        clientSocket.resume();
-      }
       
       console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
     };
@@ -423,6 +422,13 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
               proxyPort = orig.port || proxyPort;
             }
             firstChunk = chain.payload.length > 0 ? chain.payload : null;
+            if (pendingClientChunks.length > 0) {
+              if (firstChunk && firstChunk.length > 0) {
+                pendingClientChunks[0] = firstChunk;
+              } else {
+                pendingClientChunks.shift();
+              }
+            }
             console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
               layers: chain.headers.length,
               original: `${proxyIP}:${proxyPort}`,
@@ -435,22 +441,72 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
       }
     };
 
-    const handleInitialData = (buf: Buffer) => {
-      if (initialDataHandled || pipingEstablished || isClosed) {
+    const flushPendingClientData = () => {
+      if (flushingPendingClientData || !destSocket || isClosed) {
         return;
       }
 
-      initialDataHandled = true;
-      clearOutboundStartTimer();
-      clientSocket.off('data', handleInitialData);
-      clientSocket.pause();
-      initialDataPaused = true;
-      processInitialData(buf);
+      flushingPendingClientData = true;
+
+      const writeNext = () => {
+        if (isClosed || !destSocket) {
+          flushingPendingClientData = false;
+          return;
+        }
+
+        const chunk = pendingClientChunks.shift();
+        if (!chunk) {
+          flushingPendingClientData = false;
+          setupPiping();
+          return;
+        }
+
+        if (chunk.length === 0) {
+          writeNext();
+          return;
+        }
+
+        if (!loggedBufferedForward) {
+          console.log(chalk.dim(`[TCP] Forwarding buffered client data (${chunk.length} bytes)`));
+          loggedBufferedForward = true;
+        }
+
+        clientToServerBytes += chunk.length;
+        destSocket.write(chunk, (err) => {
+          if (err) {
+            console.error(chalk.red('[TCP] Failed to write buffered client data:'), err.message);
+            cleanup();
+            return;
+          }
+
+          writeNext();
+        });
+      };
+
+      writeNext();
+    };
+
+    const handleBufferedClientData = (buf: Buffer) => {
+      if (pipingEstablished || isClosed) {
+        return;
+      }
+
+      pendingClientChunks.push(buf);
+
+      if (!initialDataHandled) {
+        initialDataHandled = true;
+        clearOutboundStartTimer();
+        processInitialData(buf);
+      }
+
+      if (destConnected && startForwardingRef && !forwardingStarted) {
+        startForwardingRef();
+      }
     };
 
     // Bun では接続直後に届く最初のデータを取りこぼすことがあるため、
     // 他のログや初期化より先に listener を貼る。
-    clientSocket.on('data', handleInitialData);
+    clientSocket.on('data', handleBufferedClientData);
 
     const connectToTargets = async (targetIndex: number) => {
       if (isClosed) return;
@@ -554,29 +610,12 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         }, CONNECT_TIMEOUT_MS);
 
         const startForwarding = () => {
-          if (isClosed || !destSocket || pipingEstablished) {
+          if (isClosed || !destSocket || pipingEstablished || forwardingStarted) {
             return;
           }
 
+          forwardingStarted = true;
           clearOutboundStartTimer();
-          clientSocket.off('data', handleInitialData);
-
-          const writeInitialPayload = () => {
-            if (firstChunk && firstChunk.length > 0) {
-              console.log(chalk.dim(`[TCP] Forwarding initial data (${firstChunk.length} bytes)`));
-              clientToServerBytes += firstChunk.length;
-              destSocket!.write(firstChunk, (err) => {
-                if (err) {
-                  console.error(chalk.red('[TCP] Failed to write initial data:'), err.message);
-                  cleanup();
-                  return;
-                }
-                setupPiping();
-              });
-            } else {
-              setupPiping();
-            }
-          };
 
           try {
             if (rule.haproxy) {
@@ -592,10 +631,10 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
                   return;
                 }
 
-                writeInitialPayload();
+                flushPendingClientData();
               });
             } else {
-              writeInitialPayload();
+              flushPendingClientData();
             }
 
             if (rule.webhook && !webhookSentForConn && rule.webhook.trim() !== '') {
@@ -611,6 +650,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
             cleanup();
           }
         };
+        startForwardingRef = startForwarding;
 
         currentSocket.on('connect', async () => {
           if (settled || isClosed) return;
