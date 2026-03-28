@@ -60,6 +60,8 @@ listeners:
 注意: リスナールールで `haproxy: true` を設定することで、HAProxy PROXY Protocol v2を有効にできます。
 有効にすると、プロキシは各TCP接続**および**クライアントセッションごとの最初のUDPパケットに対してPROXY v2ヘッダーを送信します。宛先はPROXY Protocol v2をサポートする必要があります。
 
+Bedrock を UDP で公開し、backend が内部ポートを pong に広告してしまう場合は、BunProxy が既定で `Unconnected Pong` の advertised port 2項目だけをリスナーポートに合わせて書き換えます。MOTD 本文や装飾コードは変更しません。無効化したい場合のみ `rewriteBedrockPongPorts: false` を設定してください。
+
 ## デバッグログ
 
 接続時には詳細なログが表示されます:

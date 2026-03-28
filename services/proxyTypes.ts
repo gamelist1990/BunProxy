@@ -9,6 +9,7 @@ export type ListenerRule = {
   tcp?: number;
   udp?: number;
   haproxy?: boolean;
+  rewriteBedrockPongPorts?: boolean;
   webhook?: string;
   target: ProxyTarget;
   targets?: ProxyTarget[];

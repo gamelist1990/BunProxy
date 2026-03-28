@@ -138,10 +138,45 @@ export function rewriteBedrockUnconnectedPongPorts(
   payload: Buffer,
   listenerPort: number
 ): { payload: Buffer; rewritten: boolean; originalPorts?: { ipv4?: number; ipv6?: number } } {
-  const normalized = normalizeBedrockUnconnectedPong(payload, listenerPort);
+  const parsed = parseBedrockUnconnectedPong(payload);
+  if (!parsed) {
+    return { payload, rewritten: false };
+  }
+
+  const { motd, parts, stringEnd } = parsed;
+  const originalIpv4 = Number(parts[10]);
+  const originalIpv6 = Number(parts[11]);
+  const nextParts = [...parts];
+  nextParts[10] = String(listenerPort);
+  nextParts[11] = String(listenerPort);
+
+  const rewrittenMotd = nextParts.join(';');
+  if (rewrittenMotd === motd) {
+    return {
+      payload,
+      rewritten: false,
+      originalPorts: {
+        ipv4: Number.isFinite(originalIpv4) ? originalIpv4 : undefined,
+        ipv6: Number.isFinite(originalIpv6) ? originalIpv6 : undefined,
+      },
+    };
+  }
+
+  const motdBuffer = Buffer.from(rewrittenMotd, 'utf8');
+  const rewrittenPayload = Buffer.concat([
+    payload.subarray(0, 33),
+    Buffer.alloc(2),
+    motdBuffer,
+    payload.subarray(stringEnd),
+  ]);
+  rewrittenPayload.writeUInt16BE(motdBuffer.length, 33);
+
   return {
-    payload: normalized.payload,
-    rewritten: normalized.rewritten,
-    originalPorts: normalized.originalPorts,
+    payload: rewrittenPayload,
+    rewritten: true,
+    originalPorts: {
+      ipv4: Number.isFinite(originalIpv4) ? originalIpv4 : undefined,
+      ipv6: Number.isFinite(originalIpv6) ? originalIpv6 : undefined,
+    },
   };
 }

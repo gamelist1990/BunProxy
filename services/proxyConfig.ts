@@ -109,6 +109,9 @@ export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
       bind: typeof rule.bind === 'string' && rule.bind.trim() !== '' ? rule.bind : '0.0.0.0',
       tcp: normalizePort(rule.tcp, `listeners[${index}].tcp`),
       udp: normalizePort(rule.udp, `listeners[${index}].udp`),
+      rewriteBedrockPongPorts: typeof rule.rewriteBedrockPongPorts === 'boolean'
+        ? rule.rewriteBedrockPongPorts
+        : true,
       target: normalizedTargets[0],
       targets: normalizedTargets,
     } as ListenerRule;

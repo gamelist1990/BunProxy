@@ -6,7 +6,10 @@ import {
   createPlayerLeaveEmbed,
   sendDiscordWebhookEmbed,
 } from './discordEmbed.js';
-import { inspectBedrockUnconnectedPong } from './bedrockPong.js';
+import {
+  inspectBedrockUnconnectedPong,
+  rewriteBedrockUnconnectedPongPorts,
+} from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
@@ -135,6 +138,17 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
       } catch {
         // Treat as raw RakNet payload.
+      }
+
+      if (rule.rewriteBedrockPongPorts && rule.udp !== undefined) {
+        const rewritten = rewriteBedrockUnconnectedPongPorts(responsePayload, rule.udp);
+        if (rewritten.rewritten) {
+          responsePayload = rewritten.payload;
+          console.log(chalk.blue(
+            `[UDP] Rewrote Bedrock pong advertised ports ` +
+            `${rewritten.originalPorts?.ipv4 ?? 'n/a'}/${rewritten.originalPorts?.ipv6 ?? 'n/a'} -> ${rule.udp}/${rule.udp}`
+          ));
+        }
       }
 
       const responseKind = getRakNetPacketKind(responsePayload);

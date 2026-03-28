@@ -174,7 +174,7 @@ describe('TCP PROXY protocol forwarding', () => {
   });
 
   test('rewrites Bedrock unconnected pong advertised ports to the listener port', () => {
-    const motd = 'MCPE;Dedicated Server;776;1.21.80;1;20;13253860892328930865;Proxy Test;Survival;1;5000;5001;';
+    const motd = 'MCPE;§r§9Dedicated Server;776;1.21.80;1;20;13253860892328930865;§r§aProxy Test;Survival;1;5000;5001;';
     const motdBuffer = Buffer.from(motd, 'utf8');
     const pong = Buffer.concat([
       Buffer.from([0x1c]),
@@ -194,6 +194,7 @@ describe('TCP PROXY protocol forwarding', () => {
 
     expect(rewritten.rewritten).toBe(true);
     expect(rewritten.originalPorts).toEqual({ ipv4: 5000, ipv6: 5001 });
+    expect(rewrittenMotd.startsWith('MCPE;§r§9Dedicated Server;776;1.21.80;1;20;13253860892328930865;§r§aProxy Test;Survival;1;')).toBe(true);
     expect(rewrittenMotd.includes(';25565;25565;')).toBe(true);
   });
 
