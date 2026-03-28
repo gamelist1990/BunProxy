@@ -3,6 +3,7 @@ import path from 'path';
 import net from 'net';
 import dgram from 'dgram';
 import { generateProxyProtocolV2Header } from './services/proxyProtocolBuilder.js';
+import { rewriteBedrockUnconnectedPongPorts } from './services/bedrockPong.js';
 import { buildUdpForwardPayload } from './services/udpProxyForwarding.js';
 import { parseProxyV2Chain, getOriginalClientFromHeaders } from './services/proxyProtocolParser.js';
 import { isRakNetSessionStartPacket } from './services/raknetPacket.js';
@@ -349,7 +350,8 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     let destConnected = false;
     let destSocket: net.Socket | null = null;
     let initialDataHandled = false;
-    let pipingEstablished = false;
+    let serverToClientPipeEstablished = false;
+    let clientToServerPipeEstablished = false;
     let forwardingStarted = false;
     let flushingPendingClientData = false;
     let loggedBufferedForward = false;
@@ -387,26 +389,41 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
 
     console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => formatHostPort(target.host, target.tcp)).join(' -> ')}`));
 
-    const setupPiping = () => {
-      if (pipingEstablished || !destSocket) {
+    const maybeLogPipingEstablished = () => {
+      if (serverToClientPipeEstablished && clientToServerPipeEstablished) {
+        console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+      }
+    };
+
+    const setupServerToClientPiping = () => {
+      if (serverToClientPipeEstablished || !destSocket) {
         return;
       }
 
-      pipingEstablished = true;
+      serverToClientPipeEstablished = true;
+
+      destSocket.on('data', (chunk) => {
+        serverToClientBytes += chunk.length;
+      });
+
+      destSocket.pipe(clientSocket);
+      maybeLogPipingEstablished();
+    };
+
+    const setupClientToServerPiping = () => {
+      if (clientToServerPipeEstablished || !destSocket) {
+        return;
+      }
+
+      clientToServerPipeEstablished = true;
       clientSocket.off('data', handleBufferedClientData);
 
       clientSocket.on('data', (chunk) => {
         clientToServerBytes += chunk.length;
       });
-      
-      destSocket.on('data', (chunk) => {
-        serverToClientBytes += chunk.length;
-      });
-      
+
       clientSocket.pipe(destSocket);
-      destSocket.pipe(clientSocket);
-      
-      console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+      maybeLogPipingEstablished();
     };
 
     const processInitialData = (buf: Buffer) => {
@@ -458,7 +475,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         const chunk = pendingClientChunks.shift();
         if (!chunk) {
           flushingPendingClientData = false;
-          setupPiping();
+          setupClientToServerPiping();
           return;
         }
 
@@ -488,7 +505,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
     };
 
     const handleBufferedClientData = (buf: Buffer) => {
-      if (pipingEstablished || isClosed) {
+      if (clientToServerPipeEstablished || isClosed) {
         return;
       }
 
@@ -611,7 +628,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
         }, CONNECT_TIMEOUT_MS);
 
         const startForwarding = () => {
-          if (isClosed || !destSocket || pipingEstablished || forwardingStarted) {
+          if (isClosed || !destSocket || clientToServerPipeEstablished || forwardingStarted) {
             return;
           }
 
@@ -660,6 +677,7 @@ function startTcpProxy(rule: ListenerRule, useRestApi: boolean) {
           destConnected = true;
           currentSocket.setTimeout(0);
           console.log(chalk.green(`[TCP] ✓ Connected to target ${attemptTargetStr}`));
+          setupServerToClientPiping();
 
           if (initialDataHandled) {
             startForwarding();
@@ -868,6 +886,19 @@ function startUdpProxy(rule: ListenerRule, useRestApi: boolean) {
           }
         } catch {
           // Regular UDP payload
+        }
+
+        const rewrittenPong = rewriteBedrockUnconnectedPongPorts(
+          clientResponse,
+          rule.udp!
+        );
+        if (rewrittenPong.rewritten) {
+          clientResponse = rewrittenPong.payload;
+          console.log(
+            chalk.dim(
+              `[UDP] Rewrote Bedrock pong advertised ports ${rewrittenPong.originalPorts?.ipv4 ?? 'unknown'}/${rewrittenPong.originalPorts?.ipv6 ?? 'unknown'} -> ${rule.udp}`
+            )
+          );
         }
 
         if (!activeSession.hasReceivedResponse) {
