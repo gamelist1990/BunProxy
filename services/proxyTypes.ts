@@ -2,6 +2,9 @@ export type ProxyTarget = {
   host: string;
   tcp?: number;
   udp?: number;
+  urlProtocol?: 'http' | 'https';
+  urlBasePath?: string;
+  originalUrl?: string;
 };
 
 export type ListenerRule = {

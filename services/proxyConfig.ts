@@ -69,6 +69,9 @@ function parseTargetHost(value: string, fieldName: string) {
     return {
       host: parsed.hostname,
       port: parsedPort,
+      protocol: parsed.protocol === 'https:' ? 'https' : parsed.protocol === 'http:' ? 'http' : undefined,
+      basePath: parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') || '/' : undefined,
+      originalUrl: trimmed,
     };
   } catch (error) {
     if (error instanceof Error && error.message.includes('must')) {
@@ -78,6 +81,9 @@ function parseTargetHost(value: string, fieldName: string) {
     return {
       host: trimmed,
       port: undefined,
+      protocol: undefined,
+      basePath: undefined,
+      originalUrl: undefined,
     };
   }
 }
@@ -101,6 +107,9 @@ function normalizeTarget(target: unknown, fieldName: string): ProxyTarget {
     host: normalizedHost.host,
     tcp: tcpPort,
     udp: udpPort,
+    urlProtocol: normalizedHost.protocol,
+    urlBasePath: normalizedHost.basePath,
+    originalUrl: normalizedHost.originalUrl,
   };
 }
 

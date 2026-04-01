@@ -1,9 +1,11 @@
 import dns from 'dns';
 import net from 'net';
+import tls from 'tls';
 import chalk from 'chalk';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
 import { getOriginalClientFromHeaders, parseProxyV2Chain } from './proxyProtocolParser.js';
 import { getBufferPreview } from './logPreview.js';
+import { isLikelyHttpRequest, rewriteHttpRequest, rewriteHttpResponse } from './httpProxyRewrite.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import type { ListenerRule, ProxyTarget } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
@@ -27,7 +29,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     let proxyPort = clientSocket.remotePort || 0;
     let activeTarget = tcpTargets[0];
     let targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
-    let destSocket: net.Socket | null = null;
+    let destSocket: net.Socket | tls.TLSSocket | null = null;
     let destConnected = false;
     let initialDataSeen = false;
     let webhookSentForConn = false;
@@ -41,6 +43,9 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     let prefaceSent = false;
     let prefaceBuffer: Buffer | null = null;
     let prefacePayloadBytes = 0;
+    let initialHttpRequestRewritten = false;
+    let responseHeadHandled = false;
+    let pendingTargetResponseChunks: Buffer[] = [];
     let clientChunkLogCount = 0;
     let serverChunkLogCount = 0;
     const pendingClientChunks: Buffer[] = [];
@@ -180,19 +185,39 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
     };
 
-    const armTargetToClientForwarding = (socket: net.Socket) => {
-      socket.on('data', (chunk) => {
+    const maybeRewriteTargetResponse = (chunk: Buffer) => {
+      if (!activeTarget.urlProtocol || responseHeadHandled) {
+        return [chunk];
+      }
+
+      pendingTargetResponseChunks.push(chunk);
+      const combined = Buffer.concat(pendingTargetResponseChunks);
+      const headerEnd = combined.indexOf('\r\n\r\n');
+      if (headerEnd < 0) {
+        return [] as Buffer[];
+      }
+
+      responseHeadHandled = true;
+      pendingTargetResponseChunks = [];
+      return [rewriteHttpResponse(combined, activeTarget)];
+    };
+
+    const armTargetToClientForwarding = (socket: net.Socket | tls.TLSSocket) => {
+      socket.on('data', (rawChunk) => {
         if (isFinalized) {
           return;
         }
 
-        serverToClientBytes += chunk.length;
-        logServerChunk('Target -> client chunk', chunk);
-        const flushed = clientSocket.write(chunk);
-        if (!flushed) {
-          targetToClientBlocked = true;
-          socket.pause();
-          console.log(chalk.gray(`[TCP] Client socket backpressure while sending to ${clientAddr}; pausing target reads`));
+        for (const chunk of maybeRewriteTargetResponse(rawChunk)) {
+          serverToClientBytes += chunk.length;
+          logServerChunk('Target -> client chunk', chunk);
+          const flushed = clientSocket.write(chunk);
+          if (!flushed) {
+            targetToClientBlocked = true;
+            socket.pause();
+            console.log(chalk.gray(`[TCP] Client socket backpressure while sending to ${clientAddr}; pausing target reads`));
+            break;
+          }
         }
       });
 
@@ -223,7 +248,14 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       prefacePayloadBytes = bufferedBeforeConnect.reduce((sum, chunk) => sum + chunk.length, 0);
 
       if (!rule.haproxy) {
-        prefaceBuffer = bufferedBeforeConnect.length > 0 ? Buffer.concat(bufferedBeforeConnect) : null;
+        let bufferedPayload = bufferedBeforeConnect.length > 0 ? Buffer.concat(bufferedBeforeConnect) : null;
+        if (!initialHttpRequestRewritten && bufferedPayload && activeTarget.urlProtocol && isLikelyHttpRequest(bufferedPayload)) {
+          bufferedPayload = rewriteHttpRequest(bufferedPayload, activeTarget);
+          initialHttpRequestRewritten = true;
+          prefacePayloadBytes = bufferedPayload.length;
+          console.log(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
+        }
+        prefaceBuffer = bufferedPayload;
         return;
       }
 
@@ -264,12 +296,21 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       activeTarget = tcpTargets[targetIndex];
       targetStr = `${activeTarget.host}:${activeTarget.tcp}`;
+      responseHeadHandled = false;
+      pendingTargetResponseChunks = [];
+      initialHttpRequestRewritten = false;
       console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr} (${targetIndex + 1}/${tcpTargets.length})`));
 
-      const currentSocket = net.createConnection({
-        host: activeTarget.host,
-        port: activeTarget.tcp!,
-      });
+      const currentSocket = activeTarget.urlProtocol === 'https'
+        ? tls.connect({
+            host: activeTarget.host,
+            port: activeTarget.tcp!,
+            servername: activeTarget.host,
+          })
+        : net.createConnection({
+            host: activeTarget.host,
+            port: activeTarget.tcp!,
+          });
       destSocket = currentSocket;
       console.log(chalk.gray(`[TCP] Created destination socket for ${targetStr}`));
       currentSocket.setKeepAlive(true, 30_000);
