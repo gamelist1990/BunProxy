@@ -290,16 +290,20 @@ describe('TCP PROXY protocol forwarding', () => {
 
     const config = loadConfig(configPath);
 
-    expect(config.listeners[0]?.targets?.[0]).toEqual({
+    expect(config.listeners[0]?.targets?.[0]).toEqual(expect.objectContaining({
       host: 'gamelist1990.github.io',
       tcp: 19132,
       udp: 443,
-    });
-    expect(config.listeners[0]?.targets?.[1]).toEqual({
+      urlProtocol: 'https',
+      urlBasePath: '/PEXServerWebSite',
+    }));
+    expect(config.listeners[0]?.targets?.[1]).toEqual(expect.objectContaining({
       host: 'example.com',
       tcp: 2443,
       udp: 2443,
-    });
+      urlProtocol: 'https',
+      urlBasePath: '/status',
+    }));
   });
 
   test('uses default ports from URL schemes when no explicit port is provided', () => {
@@ -317,16 +321,20 @@ describe('TCP PROXY protocol forwarding', () => {
 
     const config = loadConfig(configPath);
 
-    expect(config.listeners[0]?.targets?.[0]).toEqual({
+    expect(config.listeners[0]?.targets?.[0]).toEqual(expect.objectContaining({
       host: 'example.com',
       tcp: 443,
       udp: 443,
-    });
-    expect(config.listeners[0]?.targets?.[1]).toEqual({
+      urlProtocol: 'https',
+      urlBasePath: '/some/path',
+    }));
+    expect(config.listeners[0]?.targets?.[1]).toEqual(expect.objectContaining({
       host: 'example.net',
       tcp: 80,
       udp: 80,
-    });
+      urlProtocol: 'http',
+      urlBasePath: undefined,
+    }));
   });
 
   test('rewrites incoming HTTP requests to the target base path and host', () => {

@@ -54,7 +54,10 @@ listeners:
 - **パブリックIP**: `132.145.123.39` など
 - **ローカルIP**: `127.0.0.1`, `192.168.1.100` など
 - **Tailscale IP**: `100.94.26.8` など
-- **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。接続先には URL の `hostname` が使用され、ポート未指定なら `https=443` / `http=80` が使われます。URL のパスやクエリは接続先ホストの抽出にのみ使われ、HTTPリバースプロキシのように書き換えは行いません。
+- **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。ポート未指定なら `https=443` / `http=80` が使われます。
+- **HTTP リバースプロキシ**: ターゲットがURL形式で、受信側が通常のHTTPリクエストなら、`Host` とパスをターゲットURLに合わせて書き換えます。たとえば `pexserver.mooo.com/xxxx` は `https://gamelist1990.github.io/PEXServerWebSite/xxxx` に転送されます。
+- **リダイレクト調整**: backend が `Location: https://gamelist1990.github.io/PEXServerWebSite/...` を返した場合、クライアント側では `/...` として見えるように書き換えます。
+- **制限**: これは HTTP 向けです。`https://pexserver.mooo.com` のように受信側も HTTPS にしたい場合は、BunProxy 側で証明書を使った TLS 終端を別途実装する必要があります。
 
 例:
 

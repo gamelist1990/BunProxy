@@ -162,13 +162,26 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
     };
 
+    const maybeRewriteClientRequest = (chunk: Buffer) => {
+      if (!activeTarget.urlProtocol || !isLikelyHttpRequest(chunk)) {
+        return chunk;
+      }
+
+      const rewritten = rewriteHttpRequest(chunk, activeTarget);
+      if (!rewritten.equals(chunk)) {
+        console.log(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
+      }
+      return rewritten;
+    };
+
     const queueClientChunk = (chunk: Buffer, label: string) => {
       if (chunk.length === 0 || isFinalized) {
         return;
       }
 
-      logClientChunk(label, chunk);
-      pendingClientChunks.push(chunk);
+      const outgoingChunk = maybeRewriteClientRequest(chunk);
+      logClientChunk(label, outgoingChunk);
+      pendingClientChunks.push(outgoingChunk);
       flushClientToTarget();
     };
 
@@ -248,14 +261,10 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       prefacePayloadBytes = bufferedBeforeConnect.reduce((sum, chunk) => sum + chunk.length, 0);
 
       if (!rule.haproxy) {
-        let bufferedPayload = bufferedBeforeConnect.length > 0 ? Buffer.concat(bufferedBeforeConnect) : null;
-        if (!initialHttpRequestRewritten && bufferedPayload && activeTarget.urlProtocol && isLikelyHttpRequest(bufferedPayload)) {
-          bufferedPayload = rewriteHttpRequest(bufferedPayload, activeTarget);
-          initialHttpRequestRewritten = true;
-          prefacePayloadBytes = bufferedPayload.length;
-          console.log(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
+        prefaceBuffer = bufferedBeforeConnect.length > 0 ? Buffer.concat(bufferedBeforeConnect) : null;
+        if (prefaceBuffer) {
+          prefacePayloadBytes = prefaceBuffer.length;
         }
-        prefaceBuffer = bufferedPayload;
         return;
       }
 
