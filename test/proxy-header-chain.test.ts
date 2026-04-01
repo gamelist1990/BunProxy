@@ -9,6 +9,7 @@ import {
   rewriteBedrockUnconnectedPongPorts,
 } from '../services/bedrockPong.js';
 import { loadConfig } from '../services/proxyConfig.js';
+import { rewriteHttpRequest, rewriteHttpResponse } from '../services/httpProxyRewrite.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
 import {
   describeRakNetPacket,
@@ -326,5 +327,66 @@ describe('TCP PROXY protocol forwarding', () => {
       tcp: 80,
       udp: 80,
     });
+  });
+
+  test('rewrites incoming HTTP requests to the target base path and host', () => {
+    const rewritten = rewriteHttpRequest(
+      Buffer.from([
+        'GET /about?lang=ja HTTP/1.1',
+        'Host: pexserver.mooo.com',
+        'User-Agent: Test',
+        '',
+        '',
+      ].join('\r\n'), 'latin1'),
+      {
+        host: 'gamelist1990.github.io',
+        tcp: 443,
+        urlProtocol: 'https',
+        urlBasePath: '/PEXServerWebSite',
+      }
+    ).toString('latin1');
+
+    expect(rewritten).toContain('GET /PEXServerWebSite/about?lang=ja HTTP/1.1');
+    expect(rewritten).toContain('Host: gamelist1990.github.io');
+    expect(rewritten).toContain('X-Forwarded-Host: pexserver.mooo.com');
+  });
+
+  test('does not double-prefix requests that already include the target base path', () => {
+    const rewritten = rewriteHttpRequest(
+      Buffer.from([
+        'GET /PEXServerWebSite/assets/app.js HTTP/1.1',
+        'Host: pexserver.mooo.com',
+        '',
+        '',
+      ].join('\r\n'), 'latin1'),
+      {
+        host: 'gamelist1990.github.io',
+        tcp: 443,
+        urlProtocol: 'https',
+        urlBasePath: '/PEXServerWebSite',
+      }
+    ).toString('latin1');
+
+    expect(rewritten).toContain('GET /PEXServerWebSite/assets/app.js HTTP/1.1');
+  });
+
+  test('rewrites backend redirects back to proxy-relative locations', () => {
+    const rewritten = rewriteHttpResponse(
+      Buffer.from([
+        'HTTP/1.1 301 Moved Permanently',
+        'Location: https://gamelist1990.github.io/PEXServerWebSite/docs/start',
+        'Content-Length: 0',
+        '',
+        '',
+      ].join('\r\n'), 'latin1'),
+      {
+        host: 'gamelist1990.github.io',
+        tcp: 443,
+        urlProtocol: 'https',
+        urlBasePath: '/PEXServerWebSite',
+      }
+    ).toString('latin1');
+
+    expect(rewritten).toContain('Location: /docs/start');
   });
 });
