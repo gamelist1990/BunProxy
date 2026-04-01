@@ -292,12 +292,39 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(config.listeners[0]?.targets?.[0]).toEqual({
       host: 'gamelist1990.github.io',
       tcp: 19132,
-      udp: undefined,
+      udp: 443,
     });
     expect(config.listeners[0]?.targets?.[1]).toEqual({
       host: 'example.com',
       tcp: 2443,
       udp: 2443,
+    });
+  });
+
+  test('uses default ports from URL schemes when no explicit port is provided', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunproxy-config-'));
+    const configPath = path.join(tempDir, 'config.yml');
+
+    fs.writeFileSync(configPath, [
+      'listeners:',
+      '  - bind: 0.0.0.0',
+      '    tcp: 25565',
+      '    targets:',
+      '      - host: https://example.com/some/path',
+      '      - host: http://example.net/',
+    ].join('\n'));
+
+    const config = loadConfig(configPath);
+
+    expect(config.listeners[0]?.targets?.[0]).toEqual({
+      host: 'example.com',
+      tcp: 443,
+      udp: 443,
+    });
+    expect(config.listeners[0]?.targets?.[1]).toEqual({
+      host: 'example.net',
+      tcp: 80,
+      udp: 80,
     });
   });
 });

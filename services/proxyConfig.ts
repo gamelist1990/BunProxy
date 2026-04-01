@@ -59,7 +59,13 @@ function parseTargetHost(value: string, fieldName: string) {
       throw new Error(`${fieldName}.host URL must include a hostname`);
     }
 
-    const parsedPort = parsed.port === '' ? undefined : normalizePort(parsed.port, `${fieldName}.host`);
+    const parsedPort = parsed.port === ''
+      ? parsed.protocol === 'https:'
+        ? 443
+        : parsed.protocol === 'http:'
+          ? 80
+          : undefined
+      : normalizePort(parsed.port, `${fieldName}.host`);
     return {
       host: parsed.hostname,
       port: parsedPort,

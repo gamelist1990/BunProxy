@@ -54,7 +54,7 @@ listeners:
 - **パブリックIP**: `132.145.123.39` など
 - **ローカルIP**: `127.0.0.1`, `192.168.1.100` など
 - **Tailscale IP**: `100.94.26.8` など
-- **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。接続先には URL の `hostname` が使用され、明示ポートが含まれている場合は `tcp` / `udp` 未指定時の既定値として利用されます。
+- **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。接続先には URL の `hostname` が使用され、ポート未指定なら `https=443` / `http=80` が使われます。URL のパスやクエリは接続先ホストの抽出にのみ使われ、HTTPリバースプロキシのように書き換えは行いません。
 
 例:
 
