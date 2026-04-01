@@ -20,6 +20,7 @@ import {
   getRakNetPacketKind,
   getRakNetSessionPacketKind,
   getRakNetSessionStage,
+  isRakNetSessionStartPacket,
   type RakNetSessionStage,
 } from './raknetPacket.js';
 import type { ListenerRule } from './proxyTypes.js';
@@ -72,6 +73,18 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     session.stage = nextStage;
   };
 
+  const destroySession = (key: string, session: UdpSession, reason: string) => {
+    if (session.timer) {
+      clearTimeout(session.timer);
+      session.timer = undefined;
+    }
+
+    sessions.delete(key);
+    session.destSocket.close();
+    runtime.connectionStats.udp.active--;
+    console.log(chalk.dim(`[UDP] Session closed ${session.clientAddress}:${session.clientPort} (${reason}, stage=${session.stage})`));
+  };
+
   const refreshSessionTimer = (key: string, session: UdpSession) => {
     if (session.timer) {
       clearTimeout(session.timer);
@@ -96,10 +109,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
       }
 
-      session.destSocket.close();
-      sessions.delete(key);
-      runtime.connectionStats.udp.active--;
-      console.log(chalk.dim(`[UDP] Session timeout ${session.clientAddress}:${session.clientPort} (stage=${session.stage}, idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms)`));
+      destroySession(key, session, `idle ${UDP_SESSION_IDLE_TIMEOUT_MS}ms`);
     }, UDP_SESSION_IDLE_TIMEOUT_MS);
   };
 
@@ -198,9 +208,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       if (activeSession.timer) {
         clearTimeout(activeSession.timer);
       }
-      activeSession.destSocket.close();
-      sessions.delete(key);
-      runtime.connectionStats.udp.active--;
+      destroySession(key, activeSession, `destination socket error: ${err.message}`);
     });
 
     destSocket.bind(() => {
@@ -213,20 +221,11 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
   server.on('message', (msg, rinfo) => {
     const key = sessionKey(rinfo.address, rinfo.port);
-    let session = sessions.get(key);
-    if (!session) {
-      session = createSession(key, rinfo.address, rinfo.port);
-    }
-    if (!session) {
-      return;
-    }
-
-    refreshSessionTimer(key, session);
-
     let originalIP = rinfo.address;
     let originalPort = rinfo.port;
     let actualPayload: Buffer = Buffer.from(msg);
-    const currentTarget = udpTargets[session.activeTargetIndex] ?? udpTargets[0];
+    let session = sessions.get(key);
+    const currentTarget = udpTargets[session?.activeTargetIndex ?? 0] ?? udpTargets[0];
 
     try {
       const chain = parseProxyV2Chain(msg);
@@ -241,6 +240,29 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : String(err));
     }
 
+    const isSessionStartPacket = isRakNetSessionStartPacket(actualPayload);
+    if (
+      session &&
+      isSessionStartPacket &&
+      (session.stage === 'connected' || session.stage === 'disconnecting')
+    ) {
+      console.log(chalk.yellow(
+        `[UDP] Reinitializing stale session for ${originalIP}:${originalPort} ` +
+        `after ${describeRakNetPacket(actualPayload)} (previous stage=${session.stage})`
+      ));
+      destroySession(key, session, `restart on ${describeRakNetPacket(actualPayload)}`);
+      session = undefined;
+    }
+
+    if (!session) {
+      session = createSession(key, rinfo.address, rinfo.port);
+    }
+    if (!session) {
+      return;
+    }
+
+    refreshSessionTimer(key, session);
+
     const rakNetPacket = getRakNetPacketKind(actualPayload);
     updateSessionStage(session, getRakNetSessionStage(rakNetPacket), `client ${describeRakNetPacket(actualPayload)}`);
 
@@ -250,6 +272,11 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       console.log(chalk.gray(`[UDP] Additional client->target datagram logs suppressed for ${originalIP}:${originalPort}`));
     }
     session.requestLogCount++;
+
+    if (rakNetPacket === 'disconnect_notification') {
+      destroySession(key, session, 'client disconnect notification');
+      return;
+    }
 
     const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
     if (rakNetPacketKind === 'offline_ping' && session.cachedOfflinePong && actualPayload.length >= 9) {
