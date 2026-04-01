@@ -1,3 +1,6 @@
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { describe, expect, test } from 'bun:test';
 import {
   inspectBedrockUnconnectedPong,
@@ -5,6 +8,7 @@ import {
   rewriteBedrockUnconnectedPongTimestamp,
   rewriteBedrockUnconnectedPongPorts,
 } from '../services/bedrockPong.js';
+import { loadConfig } from '../services/proxyConfig.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
 import {
   describeRakNetPacket,
@@ -267,5 +271,33 @@ describe('TCP PROXY protocol forwarding', () => {
     expect(normalizedMotd.includes(';26.10;')).toBe(true);
     expect(normalizedMotd.includes('Join now - 0/2025')).toBe(true);
     expect(normalizedMotd.includes(';25565;25565;')).toBe(true);
+  });
+
+  test('accepts URL-style target hosts and extracts hostname plus explicit port', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunproxy-config-'));
+    const configPath = path.join(tempDir, 'config.yml');
+
+    fs.writeFileSync(configPath, [
+      'listeners:',
+      '  - bind: 0.0.0.0',
+      '    tcp: 25565',
+      '    targets:',
+      '      - host: https://gamelist1990.github.io/PEXServerWebSite/',
+      '        tcp: 19132',
+      '      - host: https://example.com:2443/status',
+    ].join('\n'));
+
+    const config = loadConfig(configPath);
+
+    expect(config.listeners[0]?.targets?.[0]).toEqual({
+      host: 'gamelist1990.github.io',
+      tcp: 19132,
+      udp: undefined,
+    });
+    expect(config.listeners[0]?.targets?.[1]).toEqual({
+      host: 'example.com',
+      tcp: 2443,
+      udp: 2443,
+    });
   });
 });

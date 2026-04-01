@@ -54,6 +54,19 @@ listeners:
 - **パブリックIP**: `132.145.123.39` など
 - **ローカルIP**: `127.0.0.1`, `192.168.1.100` など
 - **Tailscale IP**: `100.94.26.8` など
+- **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。接続先には URL の `hostname` が使用され、明示ポートが含まれている場合は `tcp` / `udp` 未指定時の既定値として利用されます。
+
+例:
+
+```yaml
+listeners:
+  - bind: 0.0.0.0
+    tcp: 25565
+    targets:
+      - host: https://gamelist1990.github.io/PEXServerWebSite/
+        tcp: 19132
+      - host: https://example.com:2443/status
+```
 
 起動時に各ターゲットへの到達性チェックが自動実行されます。
 

@@ -47,6 +47,35 @@ function normalizePort(value: unknown, fieldName: string): number | undefined {
   return parsed;
 }
 
+function parseTargetHost(value: string, fieldName: string) {
+  const trimmed = value.trim();
+  if (trimmed === '') {
+    throw new Error(`${fieldName}.host must be a non-empty string`);
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (!parsed.hostname) {
+      throw new Error(`${fieldName}.host URL must include a hostname`);
+    }
+
+    const parsedPort = parsed.port === '' ? undefined : normalizePort(parsed.port, `${fieldName}.host`);
+    return {
+      host: parsed.hostname,
+      port: parsedPort,
+    };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('must')) {
+      throw error;
+    }
+
+    return {
+      host: trimmed,
+      port: undefined,
+    };
+  }
+}
+
 function normalizeTarget(target: unknown, fieldName: string): ProxyTarget {
   if (!target || typeof target !== 'object') {
     throw new Error(`${fieldName} must be an object`);
@@ -57,11 +86,15 @@ function normalizeTarget(target: unknown, fieldName: string): ProxyTarget {
     throw new Error(`${fieldName}.host must be a non-empty string`);
   }
 
+  const normalizedHost = parseTargetHost(candidate.host, fieldName);
+  const tcpPort = normalizePort(candidate.tcp, `${fieldName}.tcp`) ?? normalizedHost.port;
+  const udpPort = normalizePort(candidate.udp, `${fieldName}.udp`) ?? normalizedHost.port;
+
   return {
     ...candidate,
-    host: candidate.host.trim(),
-    tcp: normalizePort(candidate.tcp, `${fieldName}.tcp`),
-    udp: normalizePort(candidate.udp, `${fieldName}.udp`),
+    host: normalizedHost.host,
+    tcp: tcpPort,
+    udp: udpPort,
   };
 }
 
