@@ -11,5 +11,6 @@
     "strict": true,
     "types": ["node"]
   },
-  "include": ["./**/*.ts"]
+  "include": ["index.ts", "services/**/*.ts"],
+  "exclude": ["test", "test-connection.ts"]
 }

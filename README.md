@@ -11,6 +11,7 @@ YAML設定ファイルを使用したBunベースのTCP/UDPフォワーダー。
 - ✅ リアルタイム接続統計
 - ✅ Discord Webhook 通知
 - ✅ REST API モード（プレイヤー追跡）
+- ✅ HTTPS待受（TLS終端）
 - ✅ 詳細なデバッグログ
 - ✅ カラフルなCLI UI
 
@@ -36,6 +37,12 @@ listeners:
     tcp: 25565
     udp: 25565
     haproxy: true
+    https:
+      enabled: false
+      autoDetect: true
+      letsEncryptDomain: example.com
+      certPath: /etc/letsencrypt/live/example.com/fullchain.pem
+      keyPath: /etc/letsencrypt/live/example.com/privkey.pem
     webhook: "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
     targets:
       - host: localhost  # 1つ目を優先。失敗したら次へ切り替え
@@ -57,14 +64,20 @@ listeners:
 - **URL形式**: `https://gamelist1990.github.io/PEXServerWebSite/` のような完全URLも指定可能です。ポート未指定なら `https=443` / `http=80` が使われます。
 - **HTTP リバースプロキシ**: ターゲットがURL形式で、受信側が通常のHTTPリクエストなら、`Host` とパスをターゲットURLに合わせて書き換えます。たとえば `pexserver.mooo.com/xxxx` は `https://gamelist1990.github.io/PEXServerWebSite/xxxx` に転送されます。
 - **リダイレクト調整**: backend が `Location: https://gamelist1990.github.io/PEXServerWebSite/...` を返した場合、クライアント側では `/...` として見えるように書き換えます。
-- **制限**: これは HTTP 向けです。`https://pexserver.mooo.com` のように受信側も HTTPS にしたい場合は、BunProxy 側で証明書を使った TLS 終端を別途実装する必要があります。
+- **HTTPS待受**: `listeners[].https.enabled: true` で、BunProxy 自身がTLS終端して `https://...` を直接受けられます。
+- **Ubuntu自動検知**: Linux/Ubuntu では `certPath` / `keyPath` 未指定かつ `autoDetect: true` の場合、`letsEncryptDomain` を使って `/etc/letsencrypt/live/<domain>/fullchain.pem` と `privkey.pem` を探します。`letsEncryptDomain` は必須です。
+- **手動証明書**: `certPath` と `keyPath` を設定すれば、Let's Encrypt 以外のPEM証明書でも待受できます。
 
 例:
 
 ```yaml
 listeners:
   - bind: 0.0.0.0
-    tcp: 25565
+    tcp: 443
+    https:
+      enabled: true
+      autoDetect: true
+      letsEncryptDomain: example.com
     targets:
       - host: https://gamelist1990.github.io/PEXServerWebSite/
         tcp: 19132

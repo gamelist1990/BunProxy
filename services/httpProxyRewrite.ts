@@ -56,7 +56,7 @@ export function isLikelyHttpRequest(buffer: Buffer) {
   return HTTP_METHODS.has(method ?? '');
 }
 
-export function rewriteHttpRequest(buffer: Buffer, target: ProxyTarget) {
+export function rewriteHttpRequest(buffer: Buffer, target: ProxyTarget, forwardedProto: 'http' | 'https' = 'http') {
   const headerEnd = getHeaderEndIndex(buffer);
   if (headerEnd < 0) {
     return buffer;
@@ -99,7 +99,7 @@ export function rewriteHttpRequest(buffer: Buffer, target: ProxyTarget) {
     rewrittenLines.push(`X-Forwarded-Host: ${originalHost}`);
   }
   if (!rewrittenLines.some((line) => /^x-forwarded-proto\s*:/i.test(line))) {
-    rewrittenLines.push('X-Forwarded-Proto: http');
+    rewrittenLines.push(`X-Forwarded-Proto: ${forwardedProto}`);
   }
 
   const rewrittenHead = `${rewrittenLines.join('\r\n')}\r\n\r\n`;

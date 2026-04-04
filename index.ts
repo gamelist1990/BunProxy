@@ -91,7 +91,7 @@ async function main() {
       if (rule.tcp !== undefined && tcpTargets.length > 0) {
         startTcpProxy(rule, runtime);
         listenerTable.push([
-          chalk.blue('TCP'),
+          rule.https?.enabled ? chalk.green('HTTPS') : chalk.blue('TCP'),
           chalk.cyan(`${rule.bind}:${rule.tcp}`),
           chalk.yellow(tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')),
           rule.haproxy ? chalk.green('✓') : chalk.gray('✗'),

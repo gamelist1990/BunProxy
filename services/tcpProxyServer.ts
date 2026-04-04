@@ -7,6 +7,7 @@ import { getOriginalClientFromHeaders, parseProxyV2Chain } from './proxyProtocol
 import { getBufferPreview } from './logPreview.js';
 import { isLikelyHttpRequest, rewriteHttpRequest, rewriteHttpResponse } from './httpProxyRewrite.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
+import { resolveListenerTlsCredentials } from './tlsConfig.js';
 import type { ListenerRule, ProxyTarget } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
@@ -20,7 +21,9 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
   }
 
   const bindAddr = rule.bind || '0.0.0.0';
-  const server = net.createServer((clientSocket) => {
+  const listenerProto: 'http' | 'https' = rule.https?.enabled ? 'https' : 'http';
+  const tlsCredentials = resolveListenerTlsCredentials(rule.https);
+  const handleClientSocket = (clientSocket: net.Socket | tls.TLSSocket) => {
     runtime.connectionStats.tcp.total++;
     runtime.connectionStats.tcp.active++;
 
@@ -167,7 +170,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         return chunk;
       }
 
-      const rewritten = rewriteHttpRequest(chunk, activeTarget);
+      const rewritten = rewriteHttpRequest(chunk, activeTarget, listenerProto);
       if (!rewritten.equals(chunk)) {
         console.log(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
       }
@@ -513,7 +516,22 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       finalizeConnection();
     });
-  });
+  };
+
+  const server = tlsCredentials
+    ? tls.createServer({
+        cert: tlsCredentials.cert,
+        key: tlsCredentials.key,
+      }, handleClientSocket)
+    : net.createServer(handleClientSocket);
+
+  if (tlsCredentials) {
+    server.on('tlsClientError', (err: Error) => {
+      console.error(chalk.red('[TCP] TLS client error:'), err.message);
+    });
+    console.log(chalk.green(`[TCP] HTTPS enabled on ${bindAddr}:${rule.tcp}`));
+    console.log(chalk.gray(`[TCP] TLS credentials: ${tlsCredentials.source} (${tlsCredentials.certPath}, ${tlsCredentials.keyPath})`));
+  }
 
   server.on('error', (err: Error) => {
     console.error(chalk.red('[TCP] Server error:'), err.message);

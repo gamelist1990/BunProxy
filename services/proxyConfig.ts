@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import YAML from 'yaml';
-import type { ListenerRule, ProxyConfig, ProxyTarget } from './proxyTypes.js';
+import type { ListenerHttpsConfig, ListenerRule, ProxyConfig, ProxyTarget } from './proxyTypes.js';
 
 export const CONFIG_FILE = path.join(process.cwd(), 'config.yml');
 
@@ -16,6 +16,10 @@ export function writeDefaultConfig(configFile = CONFIG_FILE) {
         tcp: 8000,
         udp: 8001,
         haproxy: false,
+        https: {
+          enabled: false,
+          autoDetect: true,
+        },
         webhook: '',
         target: { host: '127.0.0.1', tcp: 9000, udp: 9001 },
       },
@@ -69,7 +73,11 @@ function parseTargetHost(value: string, fieldName: string) {
     return {
       host: parsed.hostname,
       port: parsedPort,
-      protocol: parsed.protocol === 'https:' ? 'https' : parsed.protocol === 'http:' ? 'http' : undefined,
+      protocol: parsed.protocol === 'https:'
+        ? 'https'
+        : parsed.protocol === 'http:'
+          ? 'http'
+          : undefined as 'http' | 'https' | undefined,
       basePath: parsed.pathname && parsed.pathname !== '/' ? parsed.pathname.replace(/\/+$/, '') || '/' : undefined,
       originalUrl: trimmed,
     };
@@ -110,6 +118,34 @@ function normalizeTarget(target: unknown, fieldName: string): ProxyTarget {
     urlProtocol: normalizedHost.protocol,
     urlBasePath: normalizedHost.basePath,
     originalUrl: normalizedHost.originalUrl,
+  };
+}
+
+function normalizeHttpsConfig(value: unknown, fieldName: string): ListenerHttpsConfig | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'object') {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const certPath = typeof candidate.certPath === 'string' && candidate.certPath.trim() !== ''
+    ? candidate.certPath.trim()
+    : undefined;
+  const keyPath = typeof candidate.keyPath === 'string' && candidate.keyPath.trim() !== ''
+    ? candidate.keyPath.trim()
+    : undefined;
+  const letsEncryptDomain = typeof candidate.letsEncryptDomain === 'string' && candidate.letsEncryptDomain.trim() !== ''
+    ? candidate.letsEncryptDomain.trim()
+    : undefined;
+
+  return {
+    enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : false,
+    autoDetect: typeof candidate.autoDetect === 'boolean' ? candidate.autoDetect : true,
+    letsEncryptDomain,
+    certPath,
+    keyPath,
   };
 }
 
@@ -157,6 +193,7 @@ export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
       bind: typeof rule.bind === 'string' && rule.bind.trim() !== '' ? rule.bind : '0.0.0.0',
       tcp: normalizePort(rule.tcp, `listeners[${index}].tcp`),
       udp: normalizePort(rule.udp, `listeners[${index}].udp`),
+      https: normalizeHttpsConfig(rule.https, `listeners[${index}].https`),
       rewriteBedrockPongPorts: typeof rule.rewriteBedrockPongPorts === 'boolean'
         ? rule.rewriteBedrockPongPorts
         : true,

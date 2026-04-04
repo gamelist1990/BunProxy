@@ -11,6 +11,7 @@ import {
 import { loadConfig } from '../services/proxyConfig.js';
 import { rewriteHttpRequest, rewriteHttpResponse } from '../services/httpProxyRewrite.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
+import { resolveListenerTlsCredentials } from '../services/tlsConfig.js';
 import {
   describeRakNetPacket,
   getRakNetPacketKind,
@@ -351,12 +352,14 @@ describe('TCP PROXY protocol forwarding', () => {
         tcp: 443,
         urlProtocol: 'https',
         urlBasePath: '/PEXServerWebSite',
-      }
+      },
+      'https'
     ).toString('latin1');
 
     expect(rewritten).toContain('GET /PEXServerWebSite/about?lang=ja HTTP/1.1');
     expect(rewritten).toContain('Host: gamelist1990.github.io');
     expect(rewritten).toContain('X-Forwarded-Host: pexserver.mooo.com');
+    expect(rewritten).toContain('X-Forwarded-Proto: https');
   });
 
   test('does not double-prefix requests that already include the target base path', () => {
@@ -372,7 +375,8 @@ describe('TCP PROXY protocol forwarding', () => {
         tcp: 443,
         urlProtocol: 'https',
         urlBasePath: '/PEXServerWebSite',
-      }
+      },
+      'http'
     ).toString('latin1');
 
     expect(rewritten).toContain('GET /PEXServerWebSite/assets/app.js HTTP/1.1');
@@ -396,5 +400,55 @@ describe('TCP PROXY protocol forwarding', () => {
     ).toString('latin1');
 
     expect(rewritten).toContain('Location: /docs/start');
+  });
+
+  test('parses listener HTTPS settings from config', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunproxy-config-'));
+    const configPath = path.join(tempDir, 'config.yml');
+
+    fs.writeFileSync(configPath, [
+      'listeners:',
+      '  - bind: 0.0.0.0',
+      '    tcp: 443',
+      '    https:',
+      '      enabled: true',
+      '      autoDetect: true',
+      '      letsEncryptDomain: example.com',
+      '      certPath: ./certs/fullchain.pem',
+      '      keyPath: ./certs/privkey.pem',
+      '    target:',
+      '      host: localhost',
+      '      tcp: 19132',
+    ].join('\n'));
+
+    const config = loadConfig(configPath);
+
+    expect(config.listeners[0]?.https).toEqual({
+      enabled: true,
+      autoDetect: true,
+      letsEncryptDomain: 'example.com',
+      certPath: './certs/fullchain.pem',
+      keyPath: './certs/privkey.pem',
+    });
+  });
+
+  test('resolves manual TLS credentials from configured paths', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunproxy-tls-'));
+    const certPath = path.join(tempDir, 'fullchain.pem');
+    const keyPath = path.join(tempDir, 'privkey.pem');
+    fs.writeFileSync(certPath, 'CERT');
+    fs.writeFileSync(keyPath, 'KEY');
+
+    const resolved = resolveListenerTlsCredentials({
+      enabled: true,
+      certPath,
+      keyPath,
+      autoDetect: false,
+    });
+
+    expect(resolved).not.toBeNull();
+    expect(resolved?.source).toBe('manual');
+    expect(resolved?.cert.toString('utf8')).toBe('CERT');
+    expect(resolved?.key.toString('utf8')).toBe('KEY');
   });
 });
