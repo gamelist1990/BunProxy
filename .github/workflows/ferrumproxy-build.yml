@@ -1,0 +1,88 @@
+name: Build FerrumProxy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - "FerrumProxy/**"
+      - ".github/workflows/ferrumproxy-build.yml"
+  pull_request:
+    paths:
+      - "FerrumProxy/**"
+      - ".github/workflows/ferrumproxy-build.yml"
+
+concurrency:
+  group: ferrumproxy-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: ferrum-proxy.exe
+          - platform: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: ferrum-proxy
+          - platform: linux-arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: ferrum-proxy
+          - platform: macos-x64
+            os: macos-13
+            target: x86_64-apple-darwin
+            binary: ferrum-proxy
+          - platform: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+            binary: ferrum-proxy
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: FerrumProxy
+          key: ${{ matrix.target }}
+
+      - name: Check format
+        working-directory: FerrumProxy
+        run: cargo fmt --check
+
+      - name: Check
+        working-directory: FerrumProxy
+        run: cargo check --target ${{ matrix.target }}
+
+      - name: Build release
+        working-directory: FerrumProxy
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Copy binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "FerrumProxy/target/build/${{ matrix.platform }}"
+          cp "FerrumProxy/target/${{ matrix.target }}/release/${{ matrix.binary }}" \
+             "FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.binary }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FerrumProxy-${{ matrix.platform }}
+          path: FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.binary }}
+          if-no-files-found: error
