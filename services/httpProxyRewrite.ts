@@ -136,6 +136,10 @@ export function rewriteHttpResponse(buffer: Buffer, target: ProxyTarget) {
   const origin = `${target.urlProtocol}://${target.host}`;
   const basePath = target.urlBasePath && target.urlBasePath !== '/' ? target.urlBasePath : '';
   const originWithBase = `${origin}${basePath}`;
+  const originWithBaseSlashRegex = basePath !== '' ? new RegExp(`${escapeRegex(originWithBase)}/`, 'g') : null;
+  const originWithBaseBoundaryRegex = basePath !== '' ? new RegExp(`${escapeRegex(originWithBase)}(?=["'\\s<>]|$)`, 'g') : null;
+  const originSlashRegex = new RegExp(`${escapeRegex(origin)}/`, 'g');
+  const originBoundaryRegex = new RegExp(`${escapeRegex(origin)}(?=["'\\s<>]|$)`, 'g');
 
   const rewriteLocationValue = (rawLocation: string) => {
     const location = rawLocation.trim();
@@ -165,7 +169,7 @@ export function rewriteHttpResponse(buffer: Buffer, target: ProxyTarget) {
         return line.slice(separator + 1).trim();
       }
     }
-    return undefined as string | undefined;
+    return undefined;
   };
 
   const setHeaderValue = (name: string, value: string) => {
@@ -264,14 +268,14 @@ export function rewriteHttpResponse(buffer: Buffer, target: ProxyTarget) {
     if (decodedBody) {
       const decodedText = decodedBody.toString('utf8');
       let bodyText = decodedText;
-      if (basePath !== '') {
+      if (originWithBaseSlashRegex && originWithBaseBoundaryRegex) {
         bodyText = bodyText
-          .replace(new RegExp(`${escapeRegex(originWithBase)}/`, 'g'), '/')
-          .replace(new RegExp(`${escapeRegex(originWithBase)}(?=["'\\s<>]|$)`, 'g'), '/');
+          .replace(originWithBaseSlashRegex, '/')
+          .replace(originWithBaseBoundaryRegex, '/');
       }
       bodyText = bodyText
-        .replace(new RegExp(`${escapeRegex(origin)}/`, 'g'), '/')
-        .replace(new RegExp(`${escapeRegex(origin)}(?=["'\\s<>]|$)`, 'g'), '/');
+        .replace(originSlashRegex, '/')
+        .replace(originBoundaryRegex, '/');
 
       if (bodyText !== decodedText) {
         const reEncoded = encodeBody(Buffer.from(bodyText, 'utf8'));
