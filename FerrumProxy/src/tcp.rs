@@ -232,6 +232,12 @@ async fn copy_bidirectional(
         }
 
         if !pending_initial_http.is_empty() {
+            if awaiting_initial_http_header {
+                warn!(
+                    "TCP request from {} to {} closed before complete initial HTTP headers were received",
+                    client_addr, target_addr
+                );
+            }
             target_write.write_all(&pending_initial_http).await?;
             total += pending_initial_http.len() as u64;
         }
