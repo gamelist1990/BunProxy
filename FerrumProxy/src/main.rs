@@ -72,8 +72,7 @@ async fn main() -> Result<()> {
     }
 
     for rule in cfg.listeners {
-        let tcp_targets = rule.targets_for(config::Protocol::Tcp);
-        if rule.tcp.is_some() && !tcp_targets.is_empty() {
+        if rule.tcp.is_some() && rule.has_targets_for(config::Protocol::Tcp) {
             let rule = Arc::new(rule.clone());
             let runtime = Arc::clone(&runtime);
             tasks.spawn(async move {

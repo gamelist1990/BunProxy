@@ -60,8 +60,9 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
     ? listener.targets
     : listener.target
       ? [listener.target]
-      : [createEmptyTarget()];
+      : [];
   const httpMappings = listener.httpMappings ?? [];
+  const hasHttpMappings = httpMappings.length > 0;
 
   const handleTargetChange = (targetIndex: number, field: 'host' | 'tcp' | 'udp', value: string | number | undefined) => {
     const nextTargets = targets.map((target, currentIndex) => (
@@ -76,7 +77,7 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
 
   const removeTarget = (targetIndex: number) => {
     const nextTargets = targets.filter((_, currentIndex) => currentIndex !== targetIndex);
-    onTargetsChange(nextTargets.length > 0 ? nextTargets : [createEmptyTarget()]);
+    onTargetsChange(nextTargets);
   };
 
   const addHttpMapping = () => {
@@ -288,8 +289,16 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
       </div>
 
       <p className="text-sm text-secondary mb-4">
-        {t('fallbackOrder') || 'Targets are tried in order. If the first target fails, the next target is used.'}
+        {hasHttpMappings
+          ? (t('optionalFallbackTargets') || 'With HTTP mappings, standard targets are optional fallbacks for unmatched or non-HTTP TCP traffic.')
+          : (t('fallbackOrder') || 'Targets are tried in order. If the first target fails, the next target is used.')}
       </p>
+
+      {targets.length === 0 && (
+        <p className="text-sm text-secondary mb-4">
+          {t('noFallbackTargets') || 'No fallback target is configured. HTTP/HTTPS traffic will use the path mappings below.'}
+        </p>
+      )}
 
       {targets.map((target, targetIndex) => (
         <div key={targetIndex} className="mb-4">
@@ -297,7 +306,7 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
             <strong className="text-primary">
               {(t('targetServer') || 'Target Server')} #{targetIndex + 1}
             </strong>
-            {targets.length > 1 && (
+            {(targets.length > 1 || hasHttpMappings) && (
               <Button
                 variant="danger"
                 onClick={() => removeTarget(targetIndex)}

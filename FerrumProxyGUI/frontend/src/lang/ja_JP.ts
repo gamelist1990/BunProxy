@@ -112,6 +112,8 @@ export const ja_JP: Translation = {
   addTargetServer: 'ターゲットサーバーを追加',
   removeTargetServer: 'ターゲットを削除',
   fallbackOrder: '上から順に試行されます。1つ目が失敗した場合は次のターゲットへ切り替わります。',
+  optionalFallbackTargets: 'HTTPマッピングを使う場合、通常ターゲットは未一致パスや非HTTP TCP通信向けの任意フォールバックです。',
+  noFallbackTargets: 'フォールバックターゲットは設定されていません。HTTP/HTTPS通信は下のパスマッピングで転送されます。',
   httpPathMappings: 'HTTPパスマッピング',
   httpPathMappingsHint: 'HTTP/HTTPS通信では、最も長く一致したパスが優先されます。重複するパスは慎重に設定してください。',
   httpPathMapping: 'HTTPマッピング',

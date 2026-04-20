@@ -153,6 +153,10 @@ listeners:
 }
 
 impl ListenerRule {
+    pub fn has_targets_for(&self, protocol: Protocol) -> bool {
+        !self.targets_for(protocol).is_empty() || !self.http_targets_for(protocol).is_empty()
+    }
+
     pub fn targets_for(&self, protocol: Protocol) -> Vec<ProxyTarget> {
         let mut targets = if self.targets.is_empty() {
             self.target.iter().cloned().collect::<Vec<_>>()
@@ -165,6 +169,23 @@ impl ListenerRule {
             Protocol::Udp => target.udp.is_some(),
         });
         targets
+    }
+
+    fn http_targets_for(&self, protocol: Protocol) -> Vec<ProxyTarget> {
+        self.http_mappings
+            .iter()
+            .flat_map(|mapping| {
+                if mapping.targets.is_empty() {
+                    mapping.target.iter().cloned().collect::<Vec<_>>()
+                } else {
+                    mapping.targets.clone()
+                }
+            })
+            .filter(|target| match protocol {
+                Protocol::Tcp => target.tcp.is_some(),
+                Protocol::Udp => target.udp.is_some(),
+            })
+            .collect()
     }
 
     pub fn http_targets_for_path(
