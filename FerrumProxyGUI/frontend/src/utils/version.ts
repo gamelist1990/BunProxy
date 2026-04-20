@@ -1,1 +1,1 @@
-export const DEFAULT_FERRUMPROXY_VERSION = '0.1.0';
+export const DEFAULT_FERRUMPROXY_VERSION = 'latest';

@@ -309,12 +309,12 @@ function App() {
         fetchAllReleases(),
       ]);
       setLatestVersion(latest.version);
-      setAvailableVersions(allReleases.map((r) => r.version));
+      setAvailableVersions(allReleases.map((r) => r.version).filter((version) => version !== "latest"));
     } catch (error) {
       console.error(t("errorLoadRelease"), error);
 
       setLatestVersion(DEFAULT_FERRUMPROXY_VERSION);
-      setAvailableVersions([DEFAULT_FERRUMPROXY_VERSION]);
+      setAvailableVersions([]);
     }
   }
 
@@ -635,7 +635,6 @@ function App() {
             >
               <option value="linux">{t("platformLinux")}</option>
               <option value="linux-arm64">{t("platformLinux")} (ARM64)</option>
-              <option value="macos-x64">macOS (x64)</option>
               <option value="macos-arm64">{t("platformMacOS")}</option>
               <option value="windows">{t("platformWindows")}</option>
             </select>

@@ -1,4 +1,4 @@
-export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-x64' | 'macos-arm64' | 'windows';
+export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-arm64' | 'windows';
 
 export interface FerrumProxyInstance {
   id: string;

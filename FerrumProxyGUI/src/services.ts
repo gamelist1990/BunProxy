@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-x64' | 'macos-arm64' | 'windows';
+export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-arm64' | 'windows';
 
 export interface FerrumProxyInstance {
   id: string;

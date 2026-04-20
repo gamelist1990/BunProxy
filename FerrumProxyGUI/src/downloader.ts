@@ -5,7 +5,8 @@ import chalk from 'chalk';
 
 const GITHUB_REPO = process.env.FERRUMPROXY_GITHUB_REPO || 'gamelist1990/BunProxy';
 const RELEASE_API_BASE = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
-const DEFAULT_VERSION = '0.1.0';
+const FERRUMPROXY_RELEASE_TAG = process.env.FERRUMPROXY_RELEASE_TAG || 'FerrumProxy';
+const DEFAULT_VERSION = 'latest';
 
 const CACHE_DURATION = 60 * 60 * 1000; // 1時間
 
@@ -86,8 +87,8 @@ export async function getLatestRelease(): Promise<Release> {
     return cached;
   }
 
-  console.log(chalk.blue('Fetching latest release from GitHub...'));
-  const response = await fetch(`${RELEASE_API_BASE}/latest`);
+  console.log(chalk.blue(`Fetching ${FERRUMPROXY_RELEASE_TAG} release from GitHub...`));
+  const response = await fetch(`${RELEASE_API_BASE}/tags/${FERRUMPROXY_RELEASE_TAG}`);
 
   if (!response.ok) {
     if (response.status === 403) {
@@ -95,7 +96,7 @@ export async function getLatestRelease(): Promise<Release> {
       releaseCache.setRateLimited();
       const defaultRelease: Release = {
         version: DEFAULT_VERSION,
-        tag: `release-${DEFAULT_VERSION}`,
+        tag: FERRUMPROXY_RELEASE_TAG,
         publishedAt: new Date().toISOString(),
         assets: [],
       };
@@ -107,7 +108,7 @@ export async function getLatestRelease(): Promise<Release> {
 
   const data: any = await response.json();
   const release: Release = {
-    version: data.tag_name.replace('release-', ''),
+    version: DEFAULT_VERSION,
     tag: data.tag_name,
     publishedAt: data.published_at,
     assets: data.assets.map((asset: any) => ({
@@ -129,8 +130,8 @@ export async function getAllReleases(): Promise<Release[]> {
     return cached;
   }
 
-  console.log(chalk.blue('Fetching all releases from GitHub...'));
-  const response = await fetch(`${RELEASE_API_BASE}?per_page=20`);
+  console.log(chalk.blue(`Fetching ${FERRUMPROXY_RELEASE_TAG} release from GitHub...`));
+  const response = await fetch(`${RELEASE_API_BASE}/tags/${FERRUMPROXY_RELEASE_TAG}`);
 
   if (!response.ok) {
     if (response.status === 403) {
@@ -138,7 +139,7 @@ export async function getAllReleases(): Promise<Release[]> {
       releaseCache.setRateLimited();
       const defaultReleases: Release[] = [{
         version: DEFAULT_VERSION,
-        tag: `release-${DEFAULT_VERSION}`,
+        tag: FERRUMPROXY_RELEASE_TAG,
         publishedAt: new Date().toISOString(),
         assets: [],
       }];
@@ -148,27 +149,26 @@ export async function getAllReleases(): Promise<Release[]> {
     throw new Error(`Failed to fetch releases: ${response.statusText}`);
   }
 
-  const data = await response.json() as any[];
-  const releases: Release[] = data.map((release) => ({
-    version: release.tag_name.replace('release-', ''),
-    tag: release.tag_name,
-    publishedAt: release.published_at,
-    assets: release.assets.map((asset: any) => ({
+  const data: any = await response.json();
+  const releases: Release[] = [{
+    version: DEFAULT_VERSION,
+    tag: data.tag_name,
+    publishedAt: data.published_at,
+    assets: data.assets.map((asset: any) => ({
       name: asset.name,
       url: asset.url,
       downloadUrl: asset.browser_download_url,
       size: asset.size,
     })),
-  }));
+  }];
 
   releaseCache.set('all', releases);
   return releases;
 }
 
 export async function getReleaseByVersion(version: string): Promise<Release> {
-  console.log(chalk.blue(`Fetching release ${version} from GitHub...`));
-  const tag = version.startsWith('release-') ? version : `release-${version}`;
-  const response = await fetch(`${RELEASE_API_BASE}/tags/${tag}`);
+  console.log(chalk.blue(`Fetching ${FERRUMPROXY_RELEASE_TAG} release from GitHub...`));
+  const response = await fetch(`${RELEASE_API_BASE}/tags/${FERRUMPROXY_RELEASE_TAG}`);
 
   if (!response.ok) {
     if (response.status === 403) {
@@ -181,7 +181,7 @@ export async function getReleaseByVersion(version: string): Promise<Release> {
   const data: any = await response.json();
 
   return {
-    version: data.tag_name.replace('release-', ''),
+    version: DEFAULT_VERSION,
     tag: data.tag_name,
     publishedAt: data.published_at,
     assets: data.assets.map((asset: any) => ({
@@ -255,20 +255,18 @@ export async function setExecutablePermissions(filePath: string): Promise<void> 
   }
 }
 
-export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-x64' | 'macos-arm64' | 'windows';
+export type FerrumProxyPlatform = 'linux' | 'linux-arm64' | 'macos-arm64' | 'windows';
 
-export function getPlatformAssetName(platform: FerrumProxyPlatform, version: string): string {
+export function getPlatformAssetName(platform: FerrumProxyPlatform, _version: string): string {
   switch (platform) {
     case 'linux':
-      return `FerrumProxy-${version}-linux-x64`;
+      return 'FerrumProxy-linux-x64';
     case 'linux-arm64':
-      return `FerrumProxy-${version}-linux-arm64`;
-    case 'macos-x64':
-      return `FerrumProxy-${version}-macos-x64`;
+      return 'FerrumProxy-linux-arm64';
     case 'macos-arm64':
-      return `FerrumProxy-${version}-macos-arm64`;
+      return 'FerrumProxy-macos-arm64';
     case 'windows':
-      return `FerrumProxy-${version}-windows-x64.exe`;
+      return 'FerrumProxy-windows-x64.exe';
   }
 }
 

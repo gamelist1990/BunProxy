@@ -45,7 +45,7 @@ export const en_US = {
   errorLoadLogs: 'Failed to load logs:',
   errorLoadConfig: 'Failed to load config:',
   placeholderInstanceName: 'Instance name',
-  placeholderVersion: 'Version (e.g., 0.1.0)',
+  placeholderVersion: 'Version (latest)',
   autoRestart: 'Auto restart on crash',
   autoStart: 'Auto start on boot',
   editInstanceName: 'Edit instance name',

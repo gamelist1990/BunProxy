@@ -16,6 +16,9 @@ concurrency:
   group: ferrumproxy-build-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: ${{ matrix.platform }}
@@ -28,22 +31,22 @@ jobs:
             os: windows-latest
             target: x86_64-pc-windows-msvc
             binary: ferrum-proxy.exe
+            asset: FerrumProxy-windows-x64.exe
           - platform: linux-x64
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary: ferrum-proxy
+            asset: FerrumProxy-linux-x64
           - platform: linux-arm64
             os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary: ferrum-proxy
-          - platform: macos-x64
-            os: macos-13
-            target: x86_64-apple-darwin
-            binary: ferrum-proxy
+            asset: FerrumProxy-linux-arm64
           - platform: macos-arm64
             os: macos-14
             target: aarch64-apple-darwin
             binary: ferrum-proxy
+            asset: FerrumProxy-macos-arm64
 
     steps:
       - name: Check out repository
@@ -78,11 +81,37 @@ jobs:
           set -euo pipefail
           mkdir -p "FerrumProxy/target/build/${{ matrix.platform }}"
           cp "FerrumProxy/target/${{ matrix.target }}/release/${{ matrix.binary }}" \
-             "FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.binary }}"
+             "FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.asset }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: FerrumProxy-${{ matrix.platform }}
-          path: FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.binary }}
+          path: FerrumProxy/target/build/${{ matrix.platform }}/${{ matrix.asset }}
           if-no-files-found: error
+
+  release:
+    name: Release FerrumProxy
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: FerrumProxy-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish fixed FerrumProxy release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: FerrumProxy
+          name: FerrumProxy
+          body: |
+            Latest FerrumProxy build from `${{ github.sha }}`.
+
+            This release intentionally reuses the fixed `FerrumProxy` tag so FerrumProxyGUI can always download the current binaries without version selection.
+          files: release-assets/FerrumProxy-*
+          fail_on_unmatched_files: true
+          overwrite_files: true

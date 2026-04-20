@@ -3,7 +3,7 @@
 // Run 'bun run generate:embed' to regenerate
 
 import "../public/assets/index-Bu35-hgY.css" with { type: "file" };
-import "../public/assets/index-CiDEbGiE.js" with { type: "file" };
+import "../public/assets/index-CA11pP3z.js" with { type: "file" };
 import "../public/favicon.svg" with { type: "file" };
 import "../public/index.html" with { type: "file" };
 

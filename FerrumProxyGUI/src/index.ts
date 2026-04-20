@@ -24,6 +24,15 @@ import {
 
 
 const PORT = process.env.PORT || 3000;
+const embeddedFiles = Array.isArray(Bun.embeddedFiles) ? Bun.embeddedFiles : [];
+const isCompiled = embeddedFiles.length > 0;
+const mainDir = path.dirname(Bun.main);
+const mainDirName = path.basename(mainDir).toLowerCase();
+const appRoot = isCompiled
+  ? process.cwd()
+  : mainDirName === 'src' || mainDirName === 'dist'
+  ? path.dirname(mainDir)
+  : mainDir;
 
 const app = express();
 app.set('trust proxy', true);
@@ -39,7 +48,7 @@ const server = useHttps
   : createHttpServer(app);
 const wss = new WebSocketServer({ server });
 
-const serviceManager = new ServiceManager();
+const serviceManager = new ServiceManager(path.join(appRoot, 'services.json'));
 const processManager = new ProcessManager();
 const configManager = new ConfigManager();
 const authManager = new AuthManager(serviceManager);
@@ -86,8 +95,6 @@ app.use(express.json({ limit: '2mb' }));
 app.use(cookieParser());
 app.use(authManager.authMiddleware());
 
-const embeddedFiles = Array.isArray(Bun.embeddedFiles) ? Bun.embeddedFiles : [];
-const isCompiled = embeddedFiles.length > 0;
 let embeddedIndexBlob: Blob | undefined;
 
 if (isCompiled) {
@@ -158,7 +165,7 @@ if (isCompiled) {
 } else {
   
   console.log(chalk.blue('Using regular public directory'));
-  app.use(express.static('public'));
+  app.use(express.static(path.join(appRoot, 'public')));
 }
 
 
@@ -450,7 +457,7 @@ app.get('/api/system', async (req, res) => {
     if (process.platform === 'win32') {
       platform = 'windows';
     } else if (process.platform === 'darwin') {
-      platform = process.arch === 'arm64' ? 'macos-arm64' : 'macos-x64';
+      platform = 'macos-arm64';
     } else if (process.platform === 'linux') {
       platform = process.arch === 'arm64' ? 'linux-arm64' : 'linux';
     }
@@ -500,7 +507,7 @@ app.post('/api/instances', async (req, res) => {
     }
 
     const instanceId = randomUUID();
-    const instanceDir = path.join(process.cwd(), 'instances', instanceId);
+    const instanceDir = path.join(appRoot, 'instances', instanceId);
     const dataDir = path.join(instanceDir, 'data');
     const assetName = getPlatformAssetName(platform, version);
     const binaryPath = path.join(dataDir, assetName);
@@ -1129,7 +1136,7 @@ app.get('*', async (req, res, next) => {
     return res.send(Buffer.from(content));
   }
 
-  res.sendFile(path.join(process.cwd(), 'public', 'index.html'));
+  res.sendFile(path.join(appRoot, 'public', 'index.html'));
 });
 
 

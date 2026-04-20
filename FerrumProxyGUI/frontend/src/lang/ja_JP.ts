@@ -47,7 +47,7 @@ export const ja_JP: Translation = {
   errorLoadLogs: 'ログの読み込みに失敗しました:',
   errorLoadConfig: '設定の読み込みに失敗しました:',
   placeholderInstanceName: 'インスタンス名',
-  placeholderVersion: 'バージョン (例: 0.1.0)',
+  placeholderVersion: 'バージョン (latest)',
   autoRestart: '自動的に再起動',
   autoStart: '自動起動',
   editInstanceName: 'インスタンス名を編集',

@@ -154,9 +154,9 @@ Linux/macOSでは、設定内の `endpoint` / Listener の `tcp` / `udp` が `1-
 
 ### GitHub APIレート制限
 
-無料アカウントでは1時間あたり60リクエストの制限があります。レート制限に達した場合、デフォルトバージョン(FerrumProxy 0.1.0)が使用されます。
+無料アカウントでは1時間あたり60リクエストの制限があります。レート制限に達した場合、固定タグ `FerrumProxy` の最新ビルドを既定として扱います。
 
-FerrumProxy のリリース取得先は既定で `gamelist1990/BunProxy` です。別リポジトリから取得したい場合は `FERRUMPROXY_GITHUB_REPO=owner/repo` を指定してください。
+FerrumProxy のリリース取得先は既定で `gamelist1990/BunProxy` の `FerrumProxy` タグです。別リポジトリやタグから取得したい場合は `FERRUMPROXY_GITHUB_REPO=owner/repo` / `FERRUMPROXY_RELEASE_TAG=FerrumProxy` を指定してください。
 
 ### WebSocket接続エラー
 
