@@ -30,7 +30,16 @@ pub fn resolve_tls_acceptor(config: Option<&ListenerHttpsConfig>) -> Result<Opti
 }
 
 fn resolve_paths(config: &ListenerHttpsConfig) -> Result<(PathBuf, PathBuf)> {
-    if let (Some(cert), Some(key)) = (&config.cert_path, &config.key_path) {
+    let cert_path = config
+        .cert_path
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+    let key_path = config
+        .key_path
+        .as_deref()
+        .filter(|path| !path.as_os_str().is_empty());
+
+    if let (Some(cert), Some(key)) = (cert_path, key_path) {
         return Ok((normalize_path(cert), normalize_path(key)));
     }
 
@@ -69,6 +78,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
+    ensure_file(path, "cert")?;
     let file =
         File::open(path).with_context(|| format!("failed to open cert {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -82,6 +92,7 @@ fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>> {
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
+    ensure_file(path, "key")?;
     let file =
         File::open(path).with_context(|| format!("failed to open key {}", path.display()))?;
     let mut reader = BufReader::new(file);
@@ -90,4 +101,16 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
     keys.take()
         .context("no private key found")
         .with_context(|| format!("no private key found in {}", path.display()))
+}
+
+fn ensure_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat {label} {}", path.display()))?;
+    if metadata.is_dir() {
+        bail!(
+            "{label} path {} is a directory, expected a PEM file",
+            path.display()
+        );
+    }
+    Ok(())
 }

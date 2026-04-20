@@ -57,9 +57,31 @@ export class ConfigManager extends EventEmitter {
   }
 
   async write(configPath: string, config: FerrumProxyConfig): Promise<void> {
-    const content = YAML.stringify(config);
+    const content = YAML.stringify(this.sanitize(config));
     await fs.writeFile(configPath, content, 'utf-8');
     console.log(chalk.green(`✓ Config saved: ${configPath}`));
+  }
+
+  private sanitize(config: FerrumProxyConfig): FerrumProxyConfig {
+    return {
+      ...config,
+      listeners: config.listeners?.map((listener) => {
+        const https = listener.https
+          ? {
+              ...listener.https,
+              letsEncryptDomain: listener.https.letsEncryptDomain?.trim() || undefined,
+              certPath: listener.https.certPath?.trim() || undefined,
+              keyPath: listener.https.keyPath?.trim() || undefined,
+            }
+          : undefined;
+
+        return {
+          ...listener,
+          webhook: listener.webhook?.trim() || undefined,
+          https,
+        };
+      }),
+    };
   }
 
   async validate(config: FerrumProxyConfig): Promise<{ valid: boolean; errors: string[] }> {
