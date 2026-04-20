@@ -130,11 +130,7 @@ async fn handle_client(
 
         match connect_target(&target, target_addr).await {
             Ok(mut target_stream) => {
-                let mut initial_payload = initial_payload.to_vec();
-                if target.url_protocol.is_some() && is_likely_http_request(&initial_payload) {
-                    initial_payload =
-                        rewrite_http_request(&initial_payload, &target, forwarded_proto);
-                }
+                let initial_payload = initial_payload.to_vec();
 
                 if rule.haproxy {
                     let header = build_proxy_v2_header(
@@ -147,10 +143,6 @@ async fn handle_client(
                     target_stream.write_all(&header).await?;
                 }
 
-                if !initial_payload.is_empty() {
-                    target_stream.write_all(&initial_payload).await?;
-                }
-
                 maybe_notify_connect(&runtime, &rule, &target, original_client).await;
 
                 return copy_bidirectional(
@@ -160,6 +152,7 @@ async fn handle_client(
                     target_addr,
                     target,
                     forwarded_proto,
+                    initial_payload,
                 )
                 .await;
             }
@@ -179,6 +172,7 @@ async fn copy_bidirectional(
     target_addr: SocketAddr,
     target_config: ProxyTarget,
     forwarded_proto: &'static str,
+    initial_client_payload: Vec<u8>,
 ) -> Result<()> {
     let (mut client_read, mut client_write) = tokio::io::split(client);
     let (mut target_read, mut target_write) = tokio::io::split(target);
@@ -188,6 +182,46 @@ async fn copy_bidirectional(
     let client_to_target = tokio::spawn(async move {
         let mut total = 0u64;
         let mut buf = vec![0u8; BUFFER_SIZE];
+        let mut awaiting_initial_http_header = request_target_config.url_protocol.is_some();
+        let mut pending_initial_http = Vec::new();
+
+        let mut write_outgoing = |chunk: &[u8], target_write: &mut tokio::io::WriteHalf<BoxedStream>| async move {
+            target_write.write_all(chunk).await?;
+            Ok::<u64, std::io::Error>(chunk.len() as u64)
+        };
+
+        let mut handle_chunk = |chunk: &[u8]| {
+            if awaiting_initial_http_header {
+                pending_initial_http.extend_from_slice(chunk);
+                if pending_initial_http
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .is_none()
+                {
+                    return None;
+                }
+
+                awaiting_initial_http_header = false;
+                let merged = std::mem::take(&mut pending_initial_http);
+                return Some(if is_likely_http_request(&merged) {
+                    rewrite_http_request(&merged, &request_target_config, forwarded_proto)
+                } else {
+                    merged
+                });
+            }
+
+            Some(
+                if request_target_config.url_protocol.is_some() && is_likely_http_request(chunk) {
+                    rewrite_http_request(chunk, &request_target_config, forwarded_proto)
+                } else {
+                    chunk.to_vec()
+                },
+            )
+        };
+
+        if let Some(outgoing) = handle_chunk(&initial_client_payload) {
+            total += write_outgoing(&outgoing, &mut target_write).await?;
+        }
 
         loop {
             let len = client_read.read(&mut buf).await?;
@@ -195,16 +229,13 @@ async fn copy_bidirectional(
                 break;
             }
 
-            let outgoing = if request_target_config.url_protocol.is_some()
-                && is_likely_http_request(&buf[..len])
-            {
-                rewrite_http_request(&buf[..len], &request_target_config, forwarded_proto)
-            } else {
-                buf[..len].to_vec()
-            };
+            if let Some(outgoing) = handle_chunk(&buf[..len]) {
+                total += write_outgoing(&outgoing, &mut target_write).await?;
+            }
+        }
 
-            target_write.write_all(&outgoing).await?;
-            total += outgoing.len() as u64;
+        if !pending_initial_http.is_empty() {
+            total += write_outgoing(&pending_initial_http, &mut target_write).await?;
         }
 
         Ok::<u64, std::io::Error>(total)
