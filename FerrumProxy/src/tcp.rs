@@ -248,15 +248,16 @@ async fn connect_target(target: &ProxyTarget, target_addr: SocketAddr) -> Result
         for cert in certs.certs {
             roots.add(cert)?;
         }
-        let config = ClientConfig::builder()
+        let mut config = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
         let connector = TlsConnector::from(Arc::new(config));
         let server_name = ServerName::try_from(target.host.clone())?;
         let stream = connector.connect(server_name, tcp).await?;
-        Ok(Box::new(stream))
+        Ok(Box::new(stream) as BoxedStream)
     } else {
-        Ok(Box::new(tcp))
+        Ok(Box::new(tcp) as BoxedStream)
     }
 }
 

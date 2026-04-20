@@ -21,10 +21,11 @@ pub fn resolve_tls_acceptor(config: Option<&ListenerHttpsConfig>) -> Result<Opti
     let (cert_path, key_path) = resolve_paths(config)?;
     let certs = load_certs(&cert_path)?;
     let key = load_private_key(&key_path)?;
-    let server_config = ServerConfig::builder()
+    let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .context("failed to build TLS server config")?;
+    server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
 
     Ok(Some(TlsAcceptor::from(Arc::new(server_config))))
 }
