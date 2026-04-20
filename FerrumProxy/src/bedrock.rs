@@ -22,6 +22,23 @@ pub fn is_disconnect_notification(payload: &[u8]) -> bool {
     payload.first().copied() == Some(0x15)
 }
 
+pub fn is_unconnected_pong(payload: &[u8]) -> bool {
+    parse_unconnected_pong(payload).is_some()
+}
+
+pub fn rewrite_unconnected_pong_timestamp(payload: &[u8], timestamp: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() < UNCONNECTED_PONG_STRING_OFFSET
+        || payload.first().copied() != Some(UNCONNECTED_PONG_ID)
+        || timestamp.len() != 8
+    {
+        return None;
+    }
+
+    let mut out = payload.to_vec();
+    out[1..9].copy_from_slice(timestamp);
+    Some(out)
+}
+
 pub fn rewrite_unconnected_pong_ports(payload: &[u8], listener_port: u16) -> Option<Vec<u8>> {
     let parsed = parse_unconnected_pong(payload)?;
     let mut parts = parsed

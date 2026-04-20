@@ -9,7 +9,10 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
-use crate::bedrock::{is_disconnect_notification, is_offline_ping, rewrite_unconnected_pong_ports};
+use crate::bedrock::{
+    is_disconnect_notification, is_offline_ping, is_unconnected_pong,
+    rewrite_unconnected_pong_ports, rewrite_unconnected_pong_timestamp,
+};
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
@@ -25,6 +28,7 @@ struct UdpSession {
     active_target_index: usize,
     header_sent: bool,
     notified: bool,
+    cached_offline_pong: Option<Vec<u8>>,
 }
 
 pub async fn start_udp_proxy(rule: Arc<ListenerRule>, runtime: Arc<AppRuntime>) -> Result<()> {
@@ -109,12 +113,38 @@ async fn handle_datagram(
         return Ok(());
     }
 
+    if is_offline_ping(&payload) {
+        if let (Some(cached_pong), Some(timestamp)) =
+            (session.cached_offline_pong.as_ref(), payload.get(1..9))
+        {
+            let immediate_pong =
+                rewrite_unconnected_pong_timestamp(cached_pong, timestamp).unwrap_or_else(|| {
+                    let mut out = cached_pong.clone();
+                    if out.len() >= 9 {
+                        out[1..9].copy_from_slice(timestamp);
+                    }
+                    out
+                });
+            if let Err(err) = server.send_to(&immediate_pong, peer).await {
+                debug!("Immediate Bedrock pong send to {peer} failed: {err}");
+            } else {
+                debug!("Sent immediate Bedrock pong to {peer}; refreshing backend in parallel");
+            }
+        }
+    }
+
     try_send_udp(&rule, &mut session, original_client, &payload).await?;
     if !session.notified {
         maybe_notify_connect(&runtime, &rule, &session, original_client).await;
         session.notified = true;
     }
-    sessions.lock().await.insert(peer, session);
+    let mut guard = sessions.lock().await;
+    if session.cached_offline_pong.is_none() {
+        if let Some(current) = guard.get(&peer) {
+            session.cached_offline_pong = current.cached_offline_pong.clone();
+        }
+    }
+    guard.insert(peer, session);
     Ok(())
 }
 
@@ -160,6 +190,12 @@ async fn create_session(
                         }
                     }
 
+                    if is_unconnected_pong(&response) {
+                        if let Some(session) = recv_sessions.lock().await.get_mut(&peer) {
+                            session.cached_offline_pong = Some(response.clone());
+                        }
+                    }
+
                     if let Err(err) = send_server.send_to(&response, peer).await {
                         error!("UDP response send to {peer} failed: {err}");
                         break;
@@ -186,6 +222,7 @@ async fn create_session(
         active_target_index: 0,
         header_sent: false,
         notified: false,
+        cached_offline_pong: None,
     };
     sessions.lock().await.insert(peer, session.clone());
     Ok(session)

@@ -9,6 +9,7 @@ import {
 import {
   inspectBedrockUnconnectedPong,
   rewriteBedrockUnconnectedPongPorts,
+  rewriteBedrockUnconnectedPongTimestamp,
 } from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
@@ -39,6 +40,7 @@ type UdpSession = {
   requestLogCount: number;
   responseLogCount: number;
   stage: RakNetSessionStage;
+  cachedOfflinePong?: Buffer;
   timer?: ReturnType<typeof setTimeout>;
 };
 
@@ -167,6 +169,9 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       const responseKind = getRakNetPacketKind(responsePayload);
       const responseStage = getRakNetSessionStage(responseKind);
       updateSessionStage(activeSession, responseStage, `server ${describeRakNetPacket(responsePayload)}`);
+      if (responseKind === 'unconnected_pong') {
+        activeSession.cachedOfflinePong = Buffer.from(responsePayload);
+      }
 
       const inspectedPong = inspectBedrockUnconnectedPong(responsePayload);
       if (inspectedPong) {
@@ -273,6 +278,21 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     if (rakNetPacket === 'disconnect_notification') {
       destroySession(key, session, 'client disconnect notification');
       return;
+    }
+
+    if (rakNetPacketKind === 'offline_ping' && session.cachedOfflinePong && actualPayload.length >= 9) {
+      const immediatePong = rewriteBedrockUnconnectedPongTimestamp(
+        session.cachedOfflinePong,
+        actualPayload.subarray(1, 9),
+      );
+      server.send(immediatePong, session.clientPort, session.clientAddress, (err) => {
+        if (err) {
+          debugLog(chalk.yellow(`[UDP] Failed to send immediate Bedrock pong to ${originalIP}:${originalPort}: ${err.message}`));
+          return;
+        }
+
+        debugLog(chalk.gray(`[UDP] Sent immediate Bedrock pong to ${originalIP}:${originalPort}; refreshing backend in parallel`));
+      });
     }
 
     const forceProxyHeader = rule.haproxy && rakNetPacketKind === 'offline_ping';
