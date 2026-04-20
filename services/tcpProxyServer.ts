@@ -1,4 +1,3 @@
-import dns from 'dns';
 import net from 'net';
 import tls from 'tls';
 import chalk from 'chalk';
@@ -8,6 +7,7 @@ import { getBufferPreview } from './logPreview.js';
 import { isLikelyHttpRequest, rewriteHttpRequest, rewriteHttpResponse } from './httpProxyRewrite.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import { resolveListenerTlsCredentials } from './tlsConfig.js';
+import { resolveHostnameCached } from './dnsCache.js';
 import type { ListenerRule, ProxyTarget } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
@@ -24,6 +24,12 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
   const listenerProto: 'http' | 'https' = rule.https?.enabled ? 'https' : 'http';
   const tlsCredentials = resolveListenerTlsCredentials(rule.https);
   const handleClientSocket = (clientSocket: net.Socket | tls.TLSSocket) => {
+    const debugLog = (...args: unknown[]) => {
+      if (runtime.debug) {
+        console.log(...args);
+      }
+    };
+
     runtime.connectionStats.tcp.total++;
     runtime.connectionStats.tcp.active++;
 
@@ -64,18 +70,18 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
     const logClientChunk = (label: string, chunk: Buffer) => {
       if (clientChunkLogCount < 5) {
-        console.log(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
+        debugLog(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
       } else if (clientChunkLogCount === 5) {
-        console.log(chalk.gray(`[TCP] Additional client->target chunk logs suppressed for ${clientAddr}`));
+        debugLog(chalk.gray(`[TCP] Additional client->target chunk logs suppressed for ${clientAddr}`));
       }
       clientChunkLogCount++;
     };
 
     const logServerChunk = (label: string, chunk: Buffer) => {
       if (serverChunkLogCount < 5) {
-        console.log(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
+        debugLog(chalk.gray(`[TCP] ${label} ${getBufferPreview(chunk)}`));
       } else if (serverChunkLogCount === 5) {
-        console.log(chalk.gray(`[TCP] Additional target->client chunk logs suppressed for ${clientAddr}`));
+        debugLog(chalk.gray(`[TCP] Additional target->client chunk logs suppressed for ${clientAddr}`));
       }
       serverChunkLogCount++;
     };
@@ -100,7 +106,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       isFinalized = true;
       clearAllTimers();
       runtime.connectionStats.tcp.active--;
-      console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
+      debugLog(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
     };
 
     const abortConnection = () => {
@@ -120,7 +126,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
 
       if (destConnected) {
-        console.log(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
+        debugLog(chalk.yellow(`[TCP] Connection closed ${clientAddr} (sent: ${clientToServerBytes}B, recv: ${serverToClientBytes}B)`));
       } else {
         console.log(chalk.red(`[TCP] Connection failed ${clientAddr} => ${targetStr}`));
       }
@@ -142,7 +148,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
             if (!clientSocket.destroyed) {
               clientSocket.pause();
             }
-            console.log(chalk.gray(`[TCP] Target socket backpressure for ${clientAddr}; pausing client reads`));
+            debugLog(chalk.gray(`[TCP] Target socket backpressure for ${clientAddr}; pausing client reads`));
             return;
           }
         } else {
@@ -159,7 +165,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           if (!clientSocket.destroyed) {
             clientSocket.pause();
           }
-          console.log(chalk.gray(`[TCP] Target socket backpressure for ${clientAddr}; pausing client reads`));
+          debugLog(chalk.gray(`[TCP] Target socket backpressure for ${clientAddr}; pausing client reads`));
           break;
         }
       }
@@ -172,7 +178,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       const rewritten = rewriteHttpRequest(chunk, activeTarget, listenerProto);
       if (!rewritten.equals(chunk)) {
-        console.log(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
+        debugLog(chalk.blue(`[TCP] Rewrote HTTP request for ${activeTarget.originalUrl ?? activeTarget.host}`));
       }
       return rewritten;
     };
@@ -231,7 +237,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           if (!flushed) {
             targetToClientBlocked = true;
             socket.pause();
-            console.log(chalk.gray(`[TCP] Client socket backpressure while sending to ${clientAddr}; pausing target reads`));
+            debugLog(chalk.gray(`[TCP] Client socket backpressure while sending to ${clientAddr}; pausing target reads`));
             break;
           }
         }
@@ -243,7 +249,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
         targetToClientBlocked = false;
         socket.resume();
-        console.log(chalk.gray(`[TCP] Client socket drain for ${clientAddr}; resumed target reads`));
+        debugLog(chalk.gray(`[TCP] Client socket drain for ${clientAddr}; resumed target reads`));
       });
 
       socket.on('drain', () => {
@@ -252,11 +258,11 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
         clientToTargetBlocked = false;
         clientSocket.resume();
-        console.log(chalk.gray(`[TCP] Target socket drain for ${clientAddr}; resumed client reads`));
+        debugLog(chalk.gray(`[TCP] Target socket drain for ${clientAddr}; resumed client reads`));
         flushClientToTarget();
       });
 
-      console.log(chalk.gray(`[TCP] Target -> client piping armed for ${clientAddr}`));
+      debugLog(chalk.gray(`[TCP] Target -> client piping armed for ${clientAddr}`));
     };
 
     const preparePreface = async (target: ProxyTarget) => {
@@ -276,9 +282,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       try {
         if (net.isIP(destIP) === 0) {
-          const addr = await dns.promises.lookup(destIP);
-          destIP = addr.address;
-          console.log(chalk.dim(`[TCP] Resolved ${target.host} to ${destIP}`));
+          destIP = await resolveHostnameCached(destIP);
+          debugLog(chalk.dim(`[TCP] Resolved ${target.host} to ${destIP}`));
         }
       } catch (err) {
         console.warn(
@@ -288,8 +293,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
 
       const header = generateProxyProtocolV2Header(proxyIP, proxyPort, destIP, destPort, false);
-      console.log(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
-      console.log(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(header)}`));
+      debugLog(chalk.blue(`[TCP] Sending PROXY header (${header.length} bytes) to ${destIP}:${destPort}`));
+      debugLog(chalk.gray(`[TCP] PROXY header preview ${getBufferPreview(header)}`));
       prefaceBuffer = bufferedBeforeConnect.length > 0
         ? Buffer.concat([header, ...bufferedBeforeConnect])
         : header;
@@ -311,7 +316,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       responseHeadHandled = false;
       pendingTargetResponseChunks = [];
       initialHttpRequestRewritten = false;
-      console.log(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr} (${targetIndex + 1}/${tcpTargets.length})`));
+      debugLog(chalk.cyan(`[TCP] Establishing connection: ${proxyIP}:${proxyPort} => ${targetStr} (${targetIndex + 1}/${tcpTargets.length})`));
 
       const currentSocket = activeTarget.urlProtocol === 'https'
         ? tls.connect({
@@ -324,7 +329,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
             port: activeTarget.tcp!,
           });
       destSocket = currentSocket;
-      console.log(chalk.gray(`[TCP] Created destination socket for ${targetStr}`));
+      debugLog(chalk.gray(`[TCP] Created destination socket for ${targetStr}`));
       currentSocket.setKeepAlive(true, 30_000);
       currentSocket.setNoDelay(true);
       clientSocket.setKeepAlive(true, 30_000);
@@ -339,7 +344,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         console.error(chalk.red(`[TCP] ✗ Destination connect timeout ${targetStr}`));
         currentSocket.destroy();
         if (targetIndex + 1 < tcpTargets.length) {
-          console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+          debugLog(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
           connectToTarget(targetIndex + 1);
         } else {
           abortConnection();
@@ -357,18 +362,18 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         clearTimeout(connectTimer);
         destConnected = true;
         currentSocket.setTimeout(0);
-        console.log(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
-        console.log(chalk.gray(`[TCP] Destination socket local endpoint ${currentSocket.localAddress}:${currentSocket.localPort}`));
+        debugLog(chalk.green(`[TCP] ✓ Connected to target ${targetStr}`));
+        debugLog(chalk.gray(`[TCP] Destination socket local endpoint ${currentSocket.localAddress}:${currentSocket.localPort}`));
         armTargetToClientForwarding(currentSocket);
 
         try {
           await preparePreface(activeTarget);
           if (prefacePayloadBytes > 0) {
-            console.log(chalk.dim(`[TCP] Forwarding initial data (${prefacePayloadBytes} bytes buffered)`));
+            debugLog(chalk.dim(`[TCP] Forwarding initial data (${prefacePayloadBytes} bytes buffered)`));
           }
           flushClientToTarget();
-          console.log(chalk.gray(`[TCP] Client -> target pump armed for ${clientAddr}`));
-          console.log(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
+          debugLog(chalk.gray(`[TCP] Client -> target pump armed for ${clientAddr}`));
+          debugLog(chalk.green(`[TCP] ✓ Piping established for ${clientAddr}`));
           maybeNotifyConnect();
         } catch (err) {
           console.error(chalk.red('[TCP] Error during connection setup:'), err instanceof Error ? err.message : String(err));
@@ -383,7 +388,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           settled = true;
           console.error(chalk.red(`[TCP] ✗ Destination socket error ${targetStr}:`), err.message);
           if (targetIndex + 1 < tcpTargets.length) {
-            console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+            debugLog(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
             connectToTarget(targetIndex + 1);
           } else {
             abortConnection();
@@ -407,7 +412,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       });
 
       currentSocket.on('end', () => {
-        console.log(chalk.gray(`[TCP] Destination socket ended ${targetStr}`));
+        debugLog(chalk.gray(`[TCP] Destination socket ended ${targetStr}`));
         if (!clientSocket.destroyed && !clientSocket.writableEnded) {
           clientSocket.end();
         }
@@ -420,7 +425,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         if (!settled && !destConnected && !isFinalized) {
           settled = true;
           if (targetIndex + 1 < tcpTargets.length) {
-            console.log(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
+            debugLog(chalk.yellow(`[TCP] ↻ Trying next target for ${clientAddr}`));
             connectToTarget(targetIndex + 1);
           } else {
             abortConnection();
@@ -430,7 +435,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
         targetClosed = true;
         if (!isFinalized) {
-          console.log(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
+          debugLog(chalk.dim(`[TCP] Destination socket closed ${targetStr}`));
           finalizeConnection();
         }
       });
@@ -444,8 +449,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       if (!initialDataSeen) {
         initialDataSeen = true;
         clearTimeout(initialDataTimer);
-        console.log(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')}`));
-        console.log(chalk.gray(`[TCP] Initial client data ${getBufferPreview(chunk)}`));
+        debugLog(chalk.dim(`[TCP] Incoming connection from ${clientAddr} => ${tcpTargets.map((target) => `${target.host}:${target.tcp}`).join(' -> ')}`));
+        debugLog(chalk.gray(`[TCP] Initial client data ${getBufferPreview(chunk)}`));
 
         let initialPayload: Buffer = Buffer.from(chunk);
         if (chunk.length > 16) {
@@ -459,11 +464,11 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
               }
               initialPayload = Buffer.from(chain.payload);
               if (initialPayload.length > 0) {
-                console.log(chalk.gray(`[TCP] Initial payload after PROXY strip ${getBufferPreview(initialPayload)}`));
+                debugLog(chalk.gray(`[TCP] Initial payload after PROXY strip ${getBufferPreview(initialPayload)}`));
               } else {
-                console.log(chalk.gray('[TCP] Initial payload after PROXY strip is empty'));
+                debugLog(chalk.gray('[TCP] Initial payload after PROXY strip is empty'));
               }
-              console.log(chalk.cyan('[TCP] Parsed proxy chain:'), {
+              debugLog(chalk.cyan('[TCP] Parsed proxy chain:'), {
                 layers: chain.headers.length,
                 original: `${proxyIP}:${proxyPort}`,
               });
@@ -498,7 +503,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
     clientSocket.on('end', () => {
       clearTimeout(initialDataTimer);
-      console.log(chalk.gray(`[TCP] Client socket ended ${clientAddr}`));
+      debugLog(chalk.gray(`[TCP] Client socket ended ${clientAddr}`));
       if (destSocket && !destSocket.destroyed && !destSocket.writableEnded) {
         destSocket.end();
       }
@@ -507,7 +512,7 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     clientSocket.on('close', () => {
       clearTimeout(initialDataTimer);
       clientClosed = true;
-      console.log(chalk.gray(`[TCP] Client socket closed ${clientAddr}`));
+      debugLog(chalk.gray(`[TCP] Client socket closed ${clientAddr}`));
 
       if (!destConnected && !isFinalized) {
         abortConnection();
@@ -530,7 +535,9 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       console.error(chalk.red('[TCP] TLS client error:'), err.message);
     });
     console.log(chalk.green(`[TCP] HTTPS enabled on ${bindAddr}:${rule.tcp}`));
-    console.log(chalk.gray(`[TCP] TLS credentials: ${tlsCredentials.source} (${tlsCredentials.certPath}, ${tlsCredentials.keyPath})`));
+    if (runtime.debug) {
+      console.log(chalk.gray(`[TCP] TLS credentials: ${tlsCredentials.source} (${tlsCredentials.certPath}, ${tlsCredentials.keyPath})`));
+    }
   }
 
   server.on('error', (err: Error) => {

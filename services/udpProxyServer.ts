@@ -1,5 +1,4 @@
 import dgram from 'dgram';
-import dns from 'dns';
 import net from 'net';
 import chalk from 'chalk';
 import {
@@ -13,6 +12,7 @@ import {
 } from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
+import { resolveHostnameCached } from './dnsCache.js';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
 import { parseProxyV2Chain } from './proxyProtocolParser.js';
 import {
@@ -27,6 +27,7 @@ import type { ListenerRule } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
 const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
+const BEDROCK_PONG_CACHE_TTL_MS = 2_000;
 
 type UdpSession = {
   clientAddress: string;
@@ -45,6 +46,11 @@ type UdpSession = {
   timer?: ReturnType<typeof setTimeout>;
 };
 
+type CachedBedrockPong = {
+  payload: Buffer;
+  expiresAt: number;
+};
+
 function sessionKey(address: string, port: number) {
   return `${address}:${port}`;
 }
@@ -59,6 +65,39 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
   const server = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
   const sessions = new Map<string, UdpSession>();
+  const cachedBedrockPongs = new Map<string, CachedBedrockPong>();
+  const debugLog = (...args: unknown[]) => {
+    if (runtime.debug) {
+      console.log(...args);
+    }
+  };
+
+  const getTargetCacheKey = (targetIndex: number) => {
+    const target = udpTargets[targetIndex] ?? udpTargets[0];
+    return `${target.host}:${target.udp}`;
+  };
+
+  const getCachedBedrockPong = (targetIndex: number) => {
+    const cacheKey = getTargetCacheKey(targetIndex);
+    const cached = cachedBedrockPongs.get(cacheKey);
+    if (!cached) {
+      return null;
+    }
+
+    if (cached.expiresAt <= Date.now()) {
+      cachedBedrockPongs.delete(cacheKey);
+      return null;
+    }
+
+    return cached.payload;
+  };
+
+  const setCachedBedrockPong = (targetIndex: number, payload: Buffer) => {
+    cachedBedrockPongs.set(getTargetCacheKey(targetIndex), {
+      payload: Buffer.from(payload),
+      expiresAt: Date.now() + BEDROCK_PONG_CACHE_TTL_MS,
+    });
+  };
 
   const updateSessionStage = (
     session: UdpSession,
@@ -69,7 +108,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       return;
     }
 
-    console.log(chalk.cyan(`[UDP] Session stage ${session.stage} -> ${nextStage} for ${session.clientAddress}:${session.clientPort} (${reason})`));
+    debugLog(chalk.cyan(`[UDP] Session stage ${session.stage} -> ${nextStage} for ${session.clientAddress}:${session.clientPort} (${reason})`));
     session.stage = nextStage;
   };
 
@@ -82,7 +121,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     sessions.delete(key);
     session.destSocket.close();
     runtime.connectionStats.udp.active--;
-    console.log(chalk.dim(`[UDP] Session closed ${session.clientAddress}:${session.clientPort} (${reason}, stage=${session.stage})`));
+    debugLog(chalk.dim(`[UDP] Session closed ${session.clientAddress}:${session.clientPort} (${reason}, stage=${session.stage})`));
   };
 
   const refreshSessionTimer = (key: string, session: UdpSession) => {
@@ -147,7 +186,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         const chain = parseProxyV2Chain(responsePayload);
         if (chain.headers.length > 0) {
           responsePayload = Buffer.from(chain.payload);
-          console.log(chalk.gray(`[UDP] Stripped backend PROXY header for ${activeSession.clientAddress}:${activeSession.clientPort}`));
+          debugLog(chalk.gray(`[UDP] Stripped backend PROXY header for ${activeSession.clientAddress}:${activeSession.clientPort}`));
         }
       } catch {
         // Treat as raw RakNet payload.
@@ -157,7 +196,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         const rewritten = rewriteBedrockUnconnectedPongPorts(responsePayload, rule.udp);
         if (rewritten.rewritten) {
           responsePayload = rewritten.payload;
-          console.log(chalk.blue(
+          debugLog(chalk.blue(
             `[UDP] Rewrote Bedrock pong advertised ports ` +
             `${rewritten.originalPorts?.ipv4 ?? 'n/a'}/${rewritten.originalPorts?.ipv6 ?? 'n/a'} -> ${rule.udp}/${rule.udp}`
           ));
@@ -170,11 +209,12 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       if (responseKind === 'unconnected_pong') {
         activeSession.cachedOfflinePong = Buffer.from(responsePayload);
+        setCachedBedrockPong(activeSession.activeTargetIndex, responsePayload);
       }
 
       const inspectedPong = inspectBedrockUnconnectedPong(responsePayload);
       if (inspectedPong) {
-        console.log(chalk.blue(
+        debugLog(chalk.blue(
           `[UDP] Bedrock pong fields for ${activeSession.clientAddress}:${activeSession.clientPort}: ` +
           `ports=${inspectedPong.advertisedPortV4 ?? 'n/a'}/${inspectedPong.advertisedPortV6 ?? 'n/a'} ` +
           `motd="${inspectedPong.motd}"`
@@ -182,9 +222,9 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       }
 
       if (activeSession.responseLogCount < 3) {
-        console.log(chalk.gray(`[UDP] Target -> client ${describeRakNetPacket(responsePayload)} from ${destInfo.address}:${destInfo.port} ${getBufferPreview(responsePayload)}`));
+        debugLog(chalk.gray(`[UDP] Target -> client ${describeRakNetPacket(responsePayload)} from ${destInfo.address}:${destInfo.port} ${getBufferPreview(responsePayload)}`));
       } else if (activeSession.responseLogCount === 3) {
-        console.log(chalk.gray(`[UDP] Additional target->client datagram logs suppressed for ${activeSession.clientAddress}:${activeSession.clientPort}`));
+        debugLog(chalk.gray(`[UDP] Additional target->client datagram logs suppressed for ${activeSession.clientAddress}:${activeSession.clientPort}`));
       }
       activeSession.responseLogCount++;
 
@@ -194,7 +234,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           return;
         }
 
-        console.log(chalk.gray(`[UDP] Sent ${responsePayload.length}B back to client ${clientAddress}:${clientPort}`));
+        debugLog(chalk.gray(`[UDP] Sent ${responsePayload.length}B back to client ${clientAddress}:${clientPort}`));
       });
     });
 
@@ -234,10 +274,10 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         originalIP = last.sourceAddress || originalIP;
         originalPort = last.sourcePort || originalPort;
         actualPayload = Buffer.from(chain.payload);
-        console.log(`[UDP] ${originalIP}:${originalPort} => ${currentTarget.host}:${currentTarget.udp} (payload=${actualPayload.length})`);
+        debugLog(`[UDP] ${originalIP}:${originalPort} => ${currentTarget.host}:${currentTarget.udp} (payload=${actualPayload.length})`);
       }
     } catch (err) {
-      console.log('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : String(err));
+      debugLog('[UDP] failed to parse incoming PROXY header chain', err instanceof Error ? err.message : String(err));
     }
 
     const isSessionStartPacket = isRakNetSessionStartPacket(actualPayload);
@@ -246,12 +286,34 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       isSessionStartPacket &&
       (session.stage === 'connected' || session.stage === 'disconnecting')
     ) {
-      console.log(chalk.yellow(
+      debugLog(chalk.yellow(
         `[UDP] Reinitializing stale session for ${originalIP}:${originalPort} ` +
         `after ${describeRakNetPacket(actualPayload)} (previous stage=${session.stage})`
       ));
       destroySession(key, session, `restart on ${describeRakNetPacket(actualPayload)}`);
       session = undefined;
+    }
+
+    const rakNetPacket = getRakNetPacketKind(actualPayload);
+    const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
+
+    if (!session && rakNetPacketKind === 'offline_ping' && actualPayload.length >= 9) {
+      const cachedPong = getCachedBedrockPong(0);
+      if (cachedPong) {
+        const cachedResponse = rewriteBedrockUnconnectedPongTimestamp(
+          cachedPong,
+          actualPayload.subarray(1, 9),
+        );
+        server.send(cachedResponse, rinfo.port, rinfo.address, (err) => {
+          if (err) {
+            console.error('[UDP] Error sending cached pong to client', err.message);
+            return;
+          }
+
+          debugLog(chalk.green(`[UDP] ✓ Served shared cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
+        });
+        return;
+      }
     }
 
     if (!session) {
@@ -262,14 +324,12 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     }
 
     refreshSessionTimer(key, session);
-
-    const rakNetPacket = getRakNetPacketKind(actualPayload);
     updateSessionStage(session, getRakNetSessionStage(rakNetPacket), `client ${describeRakNetPacket(actualPayload)}`);
 
     if (session.requestLogCount < 3) {
-      console.log(chalk.gray(`[UDP] Client -> target ${describeRakNetPacket(actualPayload)} ${getBufferPreview(actualPayload)}`));
+      debugLog(chalk.gray(`[UDP] Client -> target ${describeRakNetPacket(actualPayload)} ${getBufferPreview(actualPayload)}`));
     } else if (session.requestLogCount === 3) {
-      console.log(chalk.gray(`[UDP] Additional client->target datagram logs suppressed for ${originalIP}:${originalPort}`));
+      debugLog(chalk.gray(`[UDP] Additional client->target datagram logs suppressed for ${originalIP}:${originalPort}`));
     }
     session.requestLogCount++;
 
@@ -278,7 +338,6 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       return;
     }
 
-    const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
     if (rakNetPacketKind === 'offline_ping' && session.cachedOfflinePong && actualPayload.length >= 9) {
       const cachedResponse = rewriteBedrockUnconnectedPongTimestamp(
         session.cachedOfflinePong,
@@ -290,14 +349,14 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           return;
         }
 
-        console.log(chalk.green(`[UDP] ✓ Served cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
+        debugLog(chalk.green(`[UDP] ✓ Served cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
       });
       return;
     }
 
     const forceProxyHeader = rule.haproxy && rakNetPacketKind === 'offline_ping';
     if (forceProxyHeader) {
-      console.log(chalk.gray(`[UDP] RakNet offline ping detected for ${originalIP}:${originalPort}; PROXY header will be resent`));
+      debugLog(chalk.gray(`[UDP] RakNet offline ping detected for ${originalIP}:${originalPort}; PROXY header will be resent`));
     }
 
     const trySendUdp = async (targetIndex: number): Promise<void> => {
@@ -309,12 +368,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       session!.activeTargetIndex = targetIndex;
 
       try {
-        let resolved = target.host;
-        if (net.isIP(resolved) === 0) {
-          const addr = await dns.promises.lookup(target.host);
-          resolved = addr.address;
-        }
-        session!.destHostResolved = resolved;
+        session!.destHostResolved = await resolveHostnameCached(target.host);
       } catch {
         session!.destHostResolved = target.host;
       }
@@ -333,17 +387,17 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           if (rakNetPacketKind !== 'offline_ping') {
             session!.headerSent = true;
           }
-          console.log(chalk.gray(`[UDP] PROXY header preview ${getBufferPreview(header)}`));
+          debugLog(chalk.gray(`[UDP] PROXY header preview ${getBufferPreview(header)}`));
         } catch (err) {
           console.error('[UDP] Failed to generate PROXY header', err instanceof Error ? err.message : String(err));
         }
       }
 
-      session!.destSocket.send(payload, target.udp!, target.host, async (err) => {
+      session!.destSocket.send(payload, target.udp!, session!.destHostResolved ?? target.host, async (err) => {
         if (err) {
           console.error(chalk.red(`[UDP] ✗ Send error to ${target.host}:${target.udp}:`), err.message);
           if (targetIndex + 1 < udpTargets.length) {
-            console.log(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
+            debugLog(chalk.yellow(`[UDP] ↻ Trying next target for ${originalIP}:${originalPort}`));
             session!.headerSent = false;
             session!.logged = false;
             session!.notified = false;
@@ -354,7 +408,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
 
         if (!session!.logged) {
-          console.log(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${target.host}:${target.udp} (${payload.length} bytes)`));
+          debugLog(chalk.green(`[UDP] ✓ Forwarding ${originalIP}:${originalPort} => ${target.host}:${target.udp} (${payload.length} bytes)`));
           session!.logged = true;
         }
 

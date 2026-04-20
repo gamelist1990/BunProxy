@@ -16,6 +16,7 @@ export type ConnectionStats = {
 
 export type ProxyRuntime = {
   useRestApi: boolean;
+  debug: boolean;
   connectionBuffer: ConnectionBuffer;
   groupedNotifier: WebhookGroupNotifier;
   connectionStats: ConnectionStats;

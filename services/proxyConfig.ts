@@ -10,6 +10,7 @@ export function writeDefaultConfig(configFile = CONFIG_FILE) {
     endpoint: 6000,
     useRestApi: false,
     savePlayerIP: true,
+    debug: false,
     listeners: [
       {
         bind: '0.0.0.0',
@@ -206,6 +207,7 @@ export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
     endpoint: normalizePort(rawConfig.endpoint, 'endpoint') ?? 6000,
     useRestApi: typeof rawConfig.useRestApi === 'boolean' ? rawConfig.useRestApi : false,
     savePlayerIP: typeof rawConfig.savePlayerIP === 'boolean' ? rawConfig.savePlayerIP : true,
+    debug: typeof rawConfig.debug === 'boolean' ? rawConfig.debug : false,
     listeners,
   };
 }

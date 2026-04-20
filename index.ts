@@ -34,6 +34,7 @@ async function main() {
     const endpointPort = cfg.endpoint || 6000;
     const useRestApi = cfg.useRestApi ?? false;
     const savePlayerIP = cfg.savePlayerIP ?? true;
+    const debug = cfg.debug ?? false;
     const playerIPFilePath = path.join(process.cwd(), 'playerIP.json');
     const playerIPMapper = new PlayerIPMapper(playerIPFilePath, savePlayerIP);
 
@@ -45,6 +46,7 @@ async function main() {
 
     configTable.push(
       ['REST API Mode', useRestApi ? chalk.green('✓ ENABLED') : chalk.yellow('✗ DISABLED')],
+      ['Debug Logs', debug ? chalk.green('✓ ENABLED') : chalk.gray('✗ DISABLED')],
       ['Endpoint Port', chalk.cyan(endpointPort.toString())],
       ['Save Player IP', savePlayerIP ? chalk.green('✓ YES') : chalk.yellow('✗ NO')],
       ['Total Listeners', chalk.cyan(cfg.listeners.length.toString())],
@@ -68,6 +70,7 @@ async function main() {
 
     const runtime: ProxyRuntime = {
       useRestApi,
+      debug,
       connectionBuffer,
       groupedNotifier,
       connectionStats,

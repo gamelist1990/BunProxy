@@ -31,5 +31,6 @@ export type ProxyConfig = {
   endpoint?: number;
   useRestApi?: boolean;
   savePlayerIP?: boolean;
+  debug?: boolean;
   listeners: ListenerRule[];
 };
