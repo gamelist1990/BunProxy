@@ -117,8 +117,8 @@ async fn handle_datagram(
         if let (Some(cached_pong), Some(timestamp)) =
             (session.cached_offline_pong.as_ref(), payload.get(1..9))
         {
-            let immediate_pong =
-                rewrite_unconnected_pong_timestamp(cached_pong, timestamp).unwrap_or_else(|| {
+            let immediate_pong = rewrite_unconnected_pong_timestamp(cached_pong, timestamp)
+                .unwrap_or_else(|| {
                     let mut out = cached_pong.clone();
                     if out.len() >= 9 {
                         out[1..9].copy_from_slice(timestamp);
