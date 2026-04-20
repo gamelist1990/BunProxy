@@ -185,11 +185,6 @@ async fn copy_bidirectional(
         let mut awaiting_initial_http_header = request_target_config.url_protocol.is_some();
         let mut pending_initial_http = Vec::new();
 
-        let mut write_outgoing = |chunk: &[u8], target_write: &mut tokio::io::WriteHalf<BoxedStream>| async move {
-            target_write.write_all(chunk).await?;
-            Ok::<u64, std::io::Error>(chunk.len() as u64)
-        };
-
         let mut handle_chunk = |chunk: &[u8]| {
             if awaiting_initial_http_header {
                 pending_initial_http.extend_from_slice(chunk);
@@ -220,7 +215,8 @@ async fn copy_bidirectional(
         };
 
         if let Some(outgoing) = handle_chunk(&initial_client_payload) {
-            total += write_outgoing(&outgoing, &mut target_write).await?;
+            target_write.write_all(&outgoing).await?;
+            total += outgoing.len() as u64;
         }
 
         loop {
@@ -230,12 +226,14 @@ async fn copy_bidirectional(
             }
 
             if let Some(outgoing) = handle_chunk(&buf[..len]) {
-                total += write_outgoing(&outgoing, &mut target_write).await?;
+                target_write.write_all(&outgoing).await?;
+                total += outgoing.len() as u64;
             }
         }
 
         if !pending_initial_http.is_empty() {
-            total += write_outgoing(&pending_initial_http, &mut target_write).await?;
+            target_write.write_all(&pending_initial_http).await?;
+            total += pending_initial_http.len() as u64;
         }
 
         Ok::<u64, std::io::Error>(total)
