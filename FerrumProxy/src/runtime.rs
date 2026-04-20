@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ pub struct AppRuntime {
     pub connection_buffer: ConnectionBuffer,
     pub player_mapper: TimestampPlayerMapper,
     pub player_ip_mapper: PlayerIpMapper,
+    pub metrics: PerformanceMetrics,
 }
 
 impl AppRuntime {
@@ -35,6 +37,135 @@ impl AppRuntime {
             connection_buffer: ConnectionBuffer::default(),
             player_mapper: TimestampPlayerMapper::default(),
             player_ip_mapper: PlayerIpMapper::new(PathBuf::from("playerIP.json"), save_player_ip),
+            metrics: PerformanceMetrics::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceSnapshot {
+    pub uptime_seconds: u64,
+    pub tcp: ProtocolMetricsSnapshot,
+    pub udp: ProtocolMetricsSnapshot,
+    pub total_active_sessions: u64,
+    pub total_sessions: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProtocolMetricsSnapshot {
+    pub active_sessions: u64,
+    pub total_sessions: u64,
+    pub bytes_client_to_target: u64,
+    pub bytes_target_to_client: u64,
+    pub total_bytes: u64,
+}
+
+#[derive(Clone)]
+pub struct PerformanceMetrics {
+    started_at: Instant,
+    tcp: Arc<ProtocolMetrics>,
+    udp: Arc<ProtocolMetrics>,
+}
+
+impl PerformanceMetrics {
+    fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+            tcp: Arc::new(ProtocolMetrics::default()),
+            udp: Arc::new(ProtocolMetrics::default()),
+        }
+    }
+
+    pub fn tcp_session_opened(&self) {
+        self.tcp.session_opened();
+    }
+
+    pub fn tcp_session_closed(&self) {
+        self.tcp.session_closed();
+    }
+
+    pub fn tcp_client_to_target_bytes(&self, bytes: usize) {
+        self.tcp.client_to_target_bytes(bytes);
+    }
+
+    pub fn tcp_target_to_client_bytes(&self, bytes: usize) {
+        self.tcp.target_to_client_bytes(bytes);
+    }
+
+    pub fn udp_session_opened(&self) {
+        self.udp.session_opened();
+    }
+
+    pub fn udp_session_closed(&self) {
+        self.udp.session_closed();
+    }
+
+    pub fn udp_client_to_target_bytes(&self, bytes: usize) {
+        self.udp.client_to_target_bytes(bytes);
+    }
+
+    pub fn udp_target_to_client_bytes(&self, bytes: usize) {
+        self.udp.target_to_client_bytes(bytes);
+    }
+
+    pub fn snapshot(&self) -> PerformanceSnapshot {
+        let tcp = self.tcp.snapshot();
+        let udp = self.udp.snapshot();
+        PerformanceSnapshot {
+            uptime_seconds: self.started_at.elapsed().as_secs(),
+            total_active_sessions: tcp.active_sessions + udp.active_sessions,
+            total_sessions: tcp.total_sessions + udp.total_sessions,
+            total_bytes: tcp.total_bytes + udp.total_bytes,
+            tcp,
+            udp,
+        }
+    }
+}
+
+#[derive(Default)]
+struct ProtocolMetrics {
+    active_sessions: AtomicU64,
+    total_sessions: AtomicU64,
+    bytes_client_to_target: AtomicU64,
+    bytes_target_to_client: AtomicU64,
+}
+
+impl ProtocolMetrics {
+    fn session_opened(&self) {
+        self.active_sessions.fetch_add(1, Ordering::Relaxed);
+        self.total_sessions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn session_closed(&self) {
+        self.active_sessions.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| current.checked_sub(1),
+        ).ok();
+    }
+
+    fn client_to_target_bytes(&self, bytes: usize) {
+        self.bytes_client_to_target
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn target_to_client_bytes(&self, bytes: usize) {
+        self.bytes_target_to_client
+            .fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> ProtocolMetricsSnapshot {
+        let bytes_client_to_target = self.bytes_client_to_target.load(Ordering::Relaxed);
+        let bytes_target_to_client = self.bytes_target_to_client.load(Ordering::Relaxed);
+        ProtocolMetricsSnapshot {
+            active_sessions: self.active_sessions.load(Ordering::Relaxed),
+            total_sessions: self.total_sessions.load(Ordering::Relaxed),
+            bytes_client_to_target,
+            bytes_target_to_client,
+            total_bytes: bytes_client_to_target + bytes_target_to_client,
         }
     }
 }

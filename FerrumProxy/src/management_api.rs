@@ -33,6 +33,7 @@ pub async fn start_management_api(port: u16, runtime: Arc<AppRuntime>) -> anyhow
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/players", get(players))
+        .route("/api/performance", get(performance))
         .with_state(runtime)
         .layer(
             CorsLayer::new()
@@ -178,4 +179,8 @@ async fn players(State(runtime): State<Arc<AppRuntime>>) -> impl IntoResponse {
         players,
     };
     Json(response)
+}
+
+async fn performance(State(runtime): State<Arc<AppRuntime>>) -> impl IntoResponse {
+    Json(runtime.metrics.snapshot())
 }
