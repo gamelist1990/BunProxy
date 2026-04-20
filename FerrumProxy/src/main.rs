@@ -1,7 +1,6 @@
 mod bedrock;
 mod config;
 mod discord;
-mod dns_cache;
 mod http_rewrite;
 mod management_api;
 mod proxy_protocol;
@@ -41,7 +40,6 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    let dns_cache = Arc::new(dns_cache::DnsCache::default());
     let webhooks = cfg
         .listeners
         .iter()
@@ -77,10 +75,9 @@ async fn main() -> Result<()> {
         let tcp_targets = rule.targets_for(config::Protocol::Tcp);
         if rule.tcp.is_some() && !tcp_targets.is_empty() {
             let rule = Arc::new(rule.clone());
-            let dns_cache = Arc::clone(&dns_cache);
             let runtime = Arc::clone(&runtime);
             tasks.spawn(async move {
-                if let Err(err) = tcp::start_tcp_proxy(rule, dns_cache, runtime).await {
+                if let Err(err) = tcp::start_tcp_proxy(rule, runtime).await {
                     error!("TCP listener stopped: {err:#}");
                 }
             });
@@ -89,10 +86,9 @@ async fn main() -> Result<()> {
         let udp_targets = rule.targets_for(config::Protocol::Udp);
         if rule.udp.is_some() && !udp_targets.is_empty() {
             let rule = Arc::new(rule);
-            let dns_cache = Arc::clone(&dns_cache);
             let runtime = Arc::clone(&runtime);
             tasks.spawn(async move {
-                if let Err(err) = udp::start_udp_proxy(rule, dns_cache, runtime).await {
+                if let Err(err) = udp::start_udp_proxy(rule, runtime).await {
                     error!("UDP listener stopped: {err:#}");
                 }
             });

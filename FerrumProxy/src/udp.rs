@@ -1,29 +1,23 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::net::UdpSocket;
+use tokio::net::{lookup_host, UdpSocket};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
-use crate::bedrock::{
-    is_disconnect_notification, is_offline_ping, is_unconnected_pong,
-    rewrite_unconnected_pong_ports, rewrite_unconnected_pong_timestamp,
-};
+use crate::bedrock::{is_disconnect_notification, is_offline_ping, rewrite_unconnected_pong_ports};
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
-use crate::dns_cache::DnsCache;
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
 
 const UDP_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
-const BEDROCK_PONG_CACHE_TTL: Duration = Duration::from_secs(2);
 const MAX_DATAGRAM_SIZE: usize = 65_535;
 
 type SessionMap = Arc<Mutex<HashMap<SocketAddr, UdpSession>>>;
-type PongCache = Arc<Mutex<HashMap<String, CachedPong>>>;
 
 #[derive(Clone)]
 struct UdpSession {
@@ -33,16 +27,7 @@ struct UdpSession {
     notified: bool,
 }
 
-struct CachedPong {
-    payload: Vec<u8>,
-    expires_at: Instant,
-}
-
-pub async fn start_udp_proxy(
-    rule: Arc<ListenerRule>,
-    dns_cache: Arc<DnsCache>,
-    runtime: Arc<AppRuntime>,
-) -> Result<()> {
+pub async fn start_udp_proxy(rule: Arc<ListenerRule>, runtime: Arc<AppRuntime>) -> Result<()> {
     let port = rule.udp.context("UDP listener missing port")?;
     let bind = format!("{}:{port}", rule.bind);
     let server = Arc::new(
@@ -51,7 +36,6 @@ pub async fn start_udp_proxy(
             .with_context(|| format!("failed to bind UDP listener {bind}"))?,
     );
     let sessions: SessionMap = Arc::new(Mutex::new(HashMap::new()));
-    let pong_cache: PongCache = Arc::new(Mutex::new(HashMap::new()));
 
     info!("UDP listening on {bind}");
 
@@ -61,17 +45,11 @@ pub async fn start_udp_proxy(
         let packet = buf[..len].to_vec();
         let server = Arc::clone(&server);
         let sessions = Arc::clone(&sessions);
-        let pong_cache = Arc::clone(&pong_cache);
         let rule = Arc::clone(&rule);
-        let dns_cache = Arc::clone(&dns_cache);
         let runtime = Arc::clone(&runtime);
 
         tokio::spawn(async move {
-            if let Err(err) = handle_datagram(
-                server, sessions, pong_cache, rule, dns_cache, runtime, peer, packet,
-            )
-            .await
-            {
+            if let Err(err) = handle_datagram(server, sessions, rule, runtime, peer, packet).await {
                 warn!("UDP datagram from {peer} failed: {err:#}");
             }
         });
@@ -81,9 +59,7 @@ pub async fn start_udp_proxy(
 async fn handle_datagram(
     server: Arc<UdpSocket>,
     sessions: SessionMap,
-    pong_cache: PongCache,
     rule: Arc<ListenerRule>,
-    dns_cache: Arc<DnsCache>,
     runtime: Arc<AppRuntime>,
     peer: SocketAddr,
     packet: Vec<u8>,
@@ -107,15 +83,6 @@ async fn handle_datagram(
         return Ok(());
     }
 
-    if is_offline_ping(&payload) {
-        if let Some(cached) = get_cached_pong(&pong_cache, &target_cache_key(&rule, 0)).await {
-            let response = rewrite_unconnected_pong_timestamp(&cached, &payload[1..9]);
-            server.send_to(&response, peer).await?;
-            debug!("UDP served shared cached Bedrock pong to {peer}");
-            return Ok(());
-        }
-    }
-
     let mut session = {
         let guard = sessions.lock().await;
         guard.get(&peer).cloned()
@@ -126,7 +93,6 @@ async fn handle_datagram(
             create_session(
                 Arc::clone(&server),
                 Arc::clone(&sessions),
-                Arc::clone(&pong_cache),
                 Arc::clone(&rule),
                 Arc::clone(&runtime),
                 peer,
@@ -143,21 +109,7 @@ async fn handle_datagram(
         return Ok(());
     }
 
-    if is_offline_ping(&payload) {
-        if let Some(cached) = get_cached_pong(
-            &pong_cache,
-            &target_cache_key(&rule, session.active_target_index),
-        )
-        .await
-        {
-            let response = rewrite_unconnected_pong_timestamp(&cached, &payload[1..9]);
-            server.send_to(&response, peer).await?;
-            debug!("UDP served session cached Bedrock pong to {peer}");
-            return Ok(());
-        }
-    }
-
-    try_send_udp(&rule, dns_cache, &mut session, original_client, &payload).await?;
+    try_send_udp(&rule, &mut session, original_client, &payload).await?;
     if !session.notified {
         maybe_notify_connect(&runtime, &rule, &session, original_client).await;
         session.notified = true;
@@ -169,7 +121,6 @@ async fn handle_datagram(
 async fn create_session(
     server: Arc<UdpSocket>,
     sessions: SessionMap,
-    pong_cache: PongCache,
     rule: Arc<ListenerRule>,
     runtime: Arc<AppRuntime>,
     peer: SocketAddr,
@@ -185,7 +136,6 @@ async fn create_session(
     let recv_socket = Arc::clone(&socket);
     let send_server = Arc::clone(&server);
     let recv_sessions = Arc::clone(&sessions);
-    let recv_cache = Arc::clone(&pong_cache);
     let recv_rule = Arc::clone(&rule);
     let recv_runtime = Arc::clone(&runtime);
 
@@ -208,21 +158,6 @@ async fn create_session(
                         ) {
                             response = rewritten;
                         }
-                    }
-
-                    if is_unconnected_pong(&response) {
-                        let target_index = recv_sessions
-                            .lock()
-                            .await
-                            .get(&peer)
-                            .map(|session| session.active_target_index)
-                            .unwrap_or(0);
-                        set_cached_pong(
-                            &recv_cache,
-                            target_cache_key(&recv_rule, target_index),
-                            &response,
-                        )
-                        .await;
                     }
 
                     if let Err(err) = send_server.send_to(&response, peer).await {
@@ -336,7 +271,6 @@ async fn maybe_notify_disconnect(
 
 async fn try_send_udp(
     rule: &ListenerRule,
-    dns_cache: Arc<DnsCache>,
     session: &mut UdpSession,
     original_client: SocketAddr,
     payload: &[u8],
@@ -353,7 +287,6 @@ async fn try_send_udp(
 
         match send_to_target(
             rule,
-            dns_cache.as_ref(),
             session,
             original_client,
             payload,
@@ -380,7 +313,6 @@ async fn try_send_udp(
 
 async fn send_to_target(
     rule: &ListenerRule,
-    dns_cache: &DnsCache,
     session: &mut UdpSession,
     original_client: SocketAddr,
     payload: &[u8],
@@ -389,15 +321,14 @@ async fn send_to_target(
     target_index: usize,
     force_proxy_header: bool,
 ) -> Result<()> {
-    let target_ip = dns_cache.resolve(&target.host).await?;
-    let target_addr = SocketAddr::new(target_ip, target_port);
+    let target_addr = resolve_target_addr(&target.host, target_port).await?;
     let mut out = payload.to_vec();
 
     if rule.haproxy && (force_proxy_header || !session.header_sent) {
         let header = build_proxy_v2_header(
             original_client.ip(),
             original_client.port(),
-            target_ip,
+            target_addr.ip(),
             target_port,
             true,
         );
@@ -414,30 +345,11 @@ async fn send_to_target(
     Ok(())
 }
 
-async fn get_cached_pong(cache: &PongCache, key: &str) -> Option<Vec<u8>> {
-    let mut guard = cache.lock().await;
-    let cached = guard.get(key)?;
-    if cached.expires_at <= Instant::now() {
-        guard.remove(key);
-        return None;
-    }
-    Some(cached.payload.clone())
-}
-
-async fn set_cached_pong(cache: &PongCache, key: String, payload: &[u8]) {
-    cache.lock().await.insert(
-        key,
-        CachedPong {
-            payload: payload.to_vec(),
-            expires_at: Instant::now() + BEDROCK_PONG_CACHE_TTL,
-        },
-    );
-}
-
-fn target_cache_key(rule: &ListenerRule, target_index: usize) -> String {
-    let targets = rule.targets_for(Protocol::Udp);
-    match targets.get(target_index).or_else(|| targets.first()) {
-        Some(target) => format!("{}:{}", target.host, target.udp.unwrap_or_default()),
-        None => "none:0".to_string(),
-    }
+async fn resolve_target_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let mut addrs = lookup_host((host, port))
+        .await
+        .with_context(|| format!("failed to resolve {host}:{port}"))?;
+    addrs
+        .next()
+        .with_context(|| format!("no addresses returned for {host}:{port}"))
 }

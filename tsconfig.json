@@ -7,7 +7,6 @@
     "resolveJsonModule": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "outDir": "/scripts",
     "forceConsistentCasingInFileNames": true,
     "strict": true,
     "types": ["node"]

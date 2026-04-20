@@ -1,4 +1,5 @@
 import dgram from 'dgram';
+import dns from 'dns';
 import net from 'net';
 import chalk from 'chalk';
 import {
@@ -7,12 +8,10 @@ import {
 } from './discordEmbed.js';
 import {
   inspectBedrockUnconnectedPong,
-  rewriteBedrockUnconnectedPongTimestamp,
   rewriteBedrockUnconnectedPongPorts,
 } from './bedrockPong.js';
 import { getBufferPreview } from './logPreview.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
-import { resolveHostnameCached } from './dnsCache.js';
 import { generateProxyProtocolV2Header } from './proxyProtocolBuilder.js';
 import { parseProxyV2Chain } from './proxyProtocolParser.js';
 import {
@@ -27,7 +26,6 @@ import type { ListenerRule } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
 const UDP_SESSION_IDLE_TIMEOUT_MS = 60_000;
-const BEDROCK_PONG_CACHE_TTL_MS = 2_000;
 
 type UdpSession = {
   clientAddress: string;
@@ -37,18 +35,11 @@ type UdpSession = {
   headerSent?: boolean;
   notified?: boolean;
   logged?: boolean;
-  destHostResolved?: string;
   activeTargetIndex: number;
   requestLogCount: number;
   responseLogCount: number;
   stage: RakNetSessionStage;
-  cachedOfflinePong?: Buffer;
   timer?: ReturnType<typeof setTimeout>;
-};
-
-type CachedBedrockPong = {
-  payload: Buffer;
-  expiresAt: number;
 };
 
 function sessionKey(address: string, port: number) {
@@ -65,38 +56,10 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
   const socketType = net.isIP(bindAddr) === 6 ? 'udp6' : 'udp4';
   const server = dgram.createSocket({ type: socketType as 'udp4' | 'udp6' });
   const sessions = new Map<string, UdpSession>();
-  const cachedBedrockPongs = new Map<string, CachedBedrockPong>();
   const debugLog = (...args: unknown[]) => {
     if (runtime.debug) {
       console.log(...args);
     }
-  };
-
-  const getTargetCacheKey = (targetIndex: number) => {
-    const target = udpTargets[targetIndex] ?? udpTargets[0];
-    return `${target.host}:${target.udp}`;
-  };
-
-  const getCachedBedrockPong = (targetIndex: number) => {
-    const cacheKey = getTargetCacheKey(targetIndex);
-    const cached = cachedBedrockPongs.get(cacheKey);
-    if (!cached) {
-      return null;
-    }
-
-    if (cached.expiresAt <= Date.now()) {
-      cachedBedrockPongs.delete(cacheKey);
-      return null;
-    }
-
-    return cached.payload;
-  };
-
-  const setCachedBedrockPong = (targetIndex: number, payload: Buffer) => {
-    cachedBedrockPongs.set(getTargetCacheKey(targetIndex), {
-      payload: Buffer.from(payload),
-      expiresAt: Date.now() + BEDROCK_PONG_CACHE_TTL_MS,
-    });
   };
 
   const updateSessionStage = (
@@ -165,12 +128,10 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       headerSent: false,
       notified: false,
       logged: false,
-      destHostResolved: undefined,
       activeTargetIndex: 0,
       requestLogCount: 0,
       responseLogCount: 0,
       stage: 'other',
-      cachedOfflinePong: undefined,
     };
 
     destSocket.on('message', (response, destInfo) => {
@@ -206,11 +167,6 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       const responseKind = getRakNetPacketKind(responsePayload);
       const responseStage = getRakNetSessionStage(responseKind);
       updateSessionStage(activeSession, responseStage, `server ${describeRakNetPacket(responsePayload)}`);
-
-      if (responseKind === 'unconnected_pong') {
-        activeSession.cachedOfflinePong = Buffer.from(responsePayload);
-        setCachedBedrockPong(activeSession.activeTargetIndex, responsePayload);
-      }
 
       const inspectedPong = inspectBedrockUnconnectedPong(responsePayload);
       if (inspectedPong) {
@@ -297,25 +253,6 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
     const rakNetPacket = getRakNetPacketKind(actualPayload);
     const rakNetPacketKind = getRakNetSessionPacketKind(actualPayload);
 
-    if (!session && rakNetPacketKind === 'offline_ping' && actualPayload.length >= 9) {
-      const cachedPong = getCachedBedrockPong(0);
-      if (cachedPong) {
-        const cachedResponse = rewriteBedrockUnconnectedPongTimestamp(
-          cachedPong,
-          actualPayload.subarray(1, 9),
-        );
-        server.send(cachedResponse, rinfo.port, rinfo.address, (err) => {
-          if (err) {
-            console.error('[UDP] Error sending cached pong to client', err.message);
-            return;
-          }
-
-          debugLog(chalk.green(`[UDP] ✓ Served shared cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
-        });
-        return;
-      }
-    }
-
     if (!session) {
       session = createSession(key, rinfo.address, rinfo.port);
     }
@@ -338,22 +275,6 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
       return;
     }
 
-    if (rakNetPacketKind === 'offline_ping' && session.cachedOfflinePong && actualPayload.length >= 9) {
-      const cachedResponse = rewriteBedrockUnconnectedPongTimestamp(
-        session.cachedOfflinePong,
-        actualPayload.subarray(1, 9),
-      );
-      server.send(cachedResponse, rinfo.port, rinfo.address, (err) => {
-        if (err) {
-          console.error('[UDP] Error sending cached pong to client', err.message);
-          return;
-        }
-
-        debugLog(chalk.green(`[UDP] ✓ Served cached Bedrock pong to ${rinfo.address}:${rinfo.port} (${cachedResponse.length} bytes)`));
-      });
-      return;
-    }
-
     const forceProxyHeader = rule.haproxy && rakNetPacketKind === 'offline_ping';
     if (forceProxyHeader) {
       debugLog(chalk.gray(`[UDP] RakNet offline ping detected for ${originalIP}:${originalPort}; PROXY header will be resent`));
@@ -367,10 +288,14 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       session!.activeTargetIndex = targetIndex;
 
+      let resolved = target.host;
       try {
-        session!.destHostResolved = await resolveHostnameCached(target.host);
+        if (net.isIP(resolved) === 0) {
+          const addr = await dns.promises.lookup(target.host);
+          resolved = addr.address;
+        }
       } catch {
-        session!.destHostResolved = target.host;
+        resolved = target.host;
       }
 
       let payload = actualPayload;
@@ -379,7 +304,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
           const header = generateProxyProtocolV2Header(
             originalIP,
             originalPort,
-            session!.destHostResolved ?? target.host,
+            resolved,
             target.udp!,
             true,
           );
@@ -393,7 +318,7 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
         }
       }
 
-      session!.destSocket.send(payload, target.udp!, session!.destHostResolved ?? target.host, async (err) => {
+      session!.destSocket.send(payload, target.udp!, resolved, async (err) => {
         if (err) {
           console.error(chalk.red(`[UDP] ✗ Send error to ${target.host}:${target.udp}:`), err.message);
           if (targetIndex + 1 < udpTargets.length) {
@@ -401,7 +326,6 @@ export function startUdpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
             session!.headerSent = false;
             session!.logged = false;
             session!.notified = false;
-            session!.destHostResolved = undefined;
             await trySendUdp(targetIndex + 1);
           }
           return;

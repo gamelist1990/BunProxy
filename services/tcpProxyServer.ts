@@ -1,3 +1,4 @@
+import dns from 'dns';
 import net from 'net';
 import tls from 'tls';
 import chalk from 'chalk';
@@ -7,7 +8,6 @@ import { getBufferPreview } from './logPreview.js';
 import { isLikelyHttpRequest, rewriteHttpRequest, rewriteHttpResponse } from './httpProxyRewrite.js';
 import { getTargetsForProtocol } from './proxyConfig.js';
 import { resolveListenerTlsCredentials } from './tlsConfig.js';
-import { resolveHostnameCached } from './dnsCache.js';
 import type { ListenerRule, ProxyTarget } from './proxyTypes.js';
 import type { ProxyRuntime } from './proxyRuntime.js';
 
@@ -282,7 +282,8 @@ export function startTcpProxy(rule: ListenerRule, runtime: ProxyRuntime) {
 
       try {
         if (net.isIP(destIP) === 0) {
-          destIP = await resolveHostnameCached(destIP);
+          const addr = await dns.promises.lookup(destIP);
+          destIP = addr.address;
           debugLog(chalk.dim(`[TCP] Resolved ${target.host} to ${destIP}`));
         }
       } catch (err) {

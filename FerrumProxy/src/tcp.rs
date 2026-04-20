@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::time::timeout;
 use tokio_rustls::rustls::pki_types::ServerName;
 use tokio_rustls::rustls::{ClientConfig, RootCertStore};
@@ -12,7 +12,6 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
-use crate::dns_cache::DnsCache;
 use crate::http_rewrite::{is_likely_http_request, rewrite_http_request, rewrite_http_response};
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
@@ -26,11 +25,7 @@ trait AsyncStream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> AsyncStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 type BoxedStream = Box<dyn AsyncStream>;
 
-pub async fn start_tcp_proxy(
-    rule: Arc<ListenerRule>,
-    dns_cache: Arc<DnsCache>,
-    runtime: Arc<AppRuntime>,
-) -> Result<()> {
+pub async fn start_tcp_proxy(rule: Arc<ListenerRule>, runtime: Arc<AppRuntime>) -> Result<()> {
     let port = rule.tcp.context("TCP listener missing port")?;
     let bind = format!("{}:{port}", rule.bind);
     let listener = TcpListener::bind(&bind)
@@ -50,7 +45,6 @@ pub async fn start_tcp_proxy(
     loop {
         let (client, client_addr) = listener.accept().await?;
         let rule = Arc::clone(&rule);
-        let dns_cache = Arc::clone(&dns_cache);
         let runtime = Arc::clone(&runtime);
         let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(async move {
@@ -63,7 +57,7 @@ pub async fn start_tcp_proxy(
                 None => Ok(Box::new(client) as BoxedStream),
             };
             let result = match client {
-                Ok(client) => handle_client(client, client_addr, rule, dns_cache, runtime).await,
+                Ok(client) => handle_client(client, client_addr, rule, runtime).await,
                 Err(err) => Err(err),
             };
             if let Err(err) = result {
@@ -77,7 +71,6 @@ async fn handle_client(
     mut client: BoxedStream,
     client_addr: SocketAddr,
     rule: Arc<ListenerRule>,
-    dns_cache: Arc<DnsCache>,
     runtime: Arc<AppRuntime>,
 ) -> Result<()> {
     let mut first_buf = vec![0u8; BUFFER_SIZE];
@@ -118,14 +111,13 @@ async fn handle_client(
             None => continue,
         };
 
-        let target_ip = match dns_cache.resolve(&target.host).await {
-            Ok(ip) => ip,
+        let target_addr = match resolve_target_addr(&target.host, target_port).await {
+            Ok(addr) => addr,
             Err(err) => {
                 last_error = Some(err);
                 continue;
             }
         };
-        let target_addr = SocketAddr::new(target_ip, target_port);
         debug!("TCP connect {original_client} => {target_addr}");
 
         match connect_target(&target, target_addr).await {
@@ -136,7 +128,7 @@ async fn handle_client(
                     let header = build_proxy_v2_header(
                         original_client.ip(),
                         original_client.port(),
-                        target_ip,
+                        target_addr.ip(),
                         target_port,
                         false,
                     );
@@ -163,6 +155,15 @@ async fn handle_client(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("all TCP targets failed")))
+}
+
+async fn resolve_target_addr(host: &str, port: u16) -> Result<SocketAddr> {
+    let mut addrs = lookup_host((host, port))
+        .await
+        .with_context(|| format!("failed to resolve {host}:{port}"))?;
+    addrs
+        .next()
+        .with_context(|| format!("no addresses returned for {host}:{port}"))
 }
 
 async fn copy_bidirectional(
