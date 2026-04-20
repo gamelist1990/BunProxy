@@ -103,6 +103,11 @@ async fn handle_client(
         );
     }
     let initial_payload = &first_buf[parsed.payload_offset..];
+    let forwarded_proto = if rule.https.as_ref().is_some_and(|https| https.enabled) {
+        "https"
+    } else {
+        "http"
+    };
 
     let targets = rule.targets_for(Protocol::Tcp);
     let mut last_error = None;
@@ -127,12 +132,6 @@ async fn handle_client(
             Ok(mut target_stream) => {
                 let mut initial_payload = initial_payload.to_vec();
                 if target.url_protocol.is_some() && is_likely_http_request(&initial_payload) {
-                    let forwarded_proto = if rule.https.as_ref().is_some_and(|https| https.enabled)
-                    {
-                        "https"
-                    } else {
-                        "http"
-                    };
                     initial_payload =
                         rewrite_http_request(&initial_payload, &target, forwarded_proto);
                 }
@@ -160,6 +159,7 @@ async fn handle_client(
                     original_client,
                     target_addr,
                     target,
+                    forwarded_proto,
                 )
                 .await;
             }
@@ -178,16 +178,41 @@ async fn copy_bidirectional(
     client_addr: SocketAddr,
     target_addr: SocketAddr,
     target_config: ProxyTarget,
+    forwarded_proto: &'static str,
 ) -> Result<()> {
     let (mut client_read, mut client_write) = tokio::io::split(client);
     let (mut target_read, mut target_write) = tokio::io::split(target);
+    let request_target_config = target_config.clone();
+    let response_target_config = target_config;
 
-    let client_to_target =
-        tokio::spawn(async move { tokio::io::copy(&mut client_read, &mut target_write).await });
+    let client_to_target = tokio::spawn(async move {
+        let mut total = 0u64;
+        let mut buf = vec![0u8; BUFFER_SIZE];
+
+        loop {
+            let len = client_read.read(&mut buf).await?;
+            if len == 0 {
+                break;
+            }
+
+            let outgoing = if request_target_config.url_protocol.is_some()
+                && is_likely_http_request(&buf[..len])
+            {
+                rewrite_http_request(&buf[..len], &request_target_config, forwarded_proto)
+            } else {
+                buf[..len].to_vec()
+            };
+
+            target_write.write_all(&outgoing).await?;
+            total += outgoing.len() as u64;
+        }
+
+        Ok::<u64, std::io::Error>(total)
+    });
 
     let target_to_client = tokio::spawn(async move {
         let mut total = 0u64;
-        let mut response_head_handled = target_config.url_protocol.is_none();
+        let mut response_head_handled = response_target_config.url_protocol.is_none();
         let mut pending = Vec::new();
         let mut buf = vec![0u8; BUFFER_SIZE];
 
@@ -207,7 +232,7 @@ async fn copy_bidirectional(
             if let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
                 let _ = header_end;
                 response_head_handled = true;
-                let rewritten = rewrite_http_response(&pending, &target_config);
+                let rewritten = rewrite_http_response(&pending, &response_target_config);
                 client_write.write_all(&rewritten).await?;
                 total += rewritten.len() as u64;
                 pending.clear();
