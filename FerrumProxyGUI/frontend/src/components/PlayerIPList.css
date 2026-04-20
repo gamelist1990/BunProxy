@@ -1,86 +1,97 @@
 .player-ip-list {
-  padding: 1rem;
+  padding: 1.5rem;
   background: var(--bg-secondary);
-  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
   overflow-x: auto;
+  box-shadow: var(--shadow-sm);
 }
 
 .player-ip-table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--bg-primary);
-  border-radius: 8px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
 .player-ip-table thead {
-  background: var(--accent);
-  color: white;
+  background: linear-gradient(135deg, var(--bg-tertiary), rgba(99, 102, 241, 0.05));
+  color: var(--text-primary);
 }
 
 .player-ip-table th {
-  padding: 12px;
+  padding: 1rem;
   text-align: left;
-  font-weight: 600;
+  font-weight: 800;
   white-space: nowrap;
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  border-bottom: 2px solid var(--border-color);
 }
 
 .player-ip-table td {
-  padding: 12px;
-  border-top: 1px solid var(--border);
+  padding: 1rem;
+  border-top: 1px solid var(--border-color);
+  font-size: 0.9rem;
 }
 
 .username-cell {
-  font-weight: 600;
-  color: var(--accent);
+  font-weight: 700;
+  color: var(--primary-color);
   vertical-align: top;
 }
 
 .ip-cell {
-  font-family: 'Courier New', monospace;
-  color: var(--text-primary);
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
 }
 
 .protocol-badge {
   display: inline-block;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  font-weight: 600;
+  padding: 0.375rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.7rem;
+  font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 .protocol-badge.udp {
-  background: #3b82f6;
-  color: white;
+  background: rgba(41, 182, 246, 0.15);
+  color: var(--info-color);
+  border: 1px solid rgba(41, 182, 246, 0.3);
 }
 
 .protocol-badge.tcp {
-  background: #10b981;
-  color: white;
+  background: rgba(102, 187, 106, 0.15);
+  color: var(--success-color);
+  border: 1px solid rgba(102, 187, 106, 0.3);
 }
 
 .timestamp-cell {
-  font-size: 0.9rem;
-  color: var(--text-secondary);
+  font-size: 0.85rem;
+  color: var(--text-muted);
 }
 
 .time-since-cell {
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   color: var(--text-muted);
-  font-style: italic;
+  font-weight: 500;
 }
 
 .no-data {
-  padding: 2rem;
+  padding: 3rem 2rem;
   text-align: center;
   color: var(--text-muted);
   font-style: italic;
-  font-size: 1.1rem;
+  font-size: 1rem;
 }
 
 .player-ip-table tbody tr:hover {
-  background: var(--bg-hover);
+  background: var(--bg-tertiary);
+  transition: background 0.2s ease;
 }
 
 @media (max-width: 768px) {
@@ -90,6 +101,6 @@
   
   .player-ip-table th,
   .player-ip-table td {
-    padding: 8px;
+    padding: 0.75rem;
   }
 }

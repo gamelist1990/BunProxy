@@ -3,18 +3,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg-primary);
+  background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-tertiary) 100%);
   position: relative;
   overflow: hidden;
 }
 
 .login-box {
   background: var(--bg-secondary);
-  padding: 3rem;
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
+  padding: 3.5rem;
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
   width: 100%;
-  max-width: 640px;
+  max-width: 500px;
   border: 1px solid var(--border-color);
   position: relative;
   z-index: 1;
@@ -24,7 +24,7 @@
 @keyframes slideUp {
   from {
     opacity: 0;
-    transform: translateY(30px);
+    transform: translateY(40px);
   }
   to {
     opacity: 1;
@@ -33,11 +33,15 @@
 }
 
 .login-box h1 {
-  margin-bottom: 0.75rem;
-  color: var(--primary-color);
+  margin-bottom: 1rem;
+  background: linear-gradient(135deg, var(--primary-color), var(--info-color));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
   text-align: center;
   font-size: 2rem;
-  font-weight: 700;
+  font-weight: 900;
+  letter-spacing: -0.5px;
 }
 
 .login-description {
@@ -45,7 +49,7 @@
   color: var(--text-secondary);
   margin-bottom: 2.5rem;
   font-size: 0.95rem;
-  line-height: 1.6;
+  line-height: 1.7;
 }
 
 .form-group {

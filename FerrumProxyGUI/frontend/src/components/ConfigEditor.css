@@ -3,7 +3,7 @@
 .config-editor {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 2rem;
   height: 100%;
 }
 
@@ -11,20 +11,26 @@
   width: 100%;
   background: var(--bg-tertiary);
   color: var(--text-primary);
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 1rem;
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  border: 1.5px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: 1.25rem;
+  font-family: var(--font-mono);
   font-size: 0.9rem;
-  line-height: 1.5;
+  line-height: 1.6;
   resize: vertical;
   min-height: 400px;
+  transition: all 0.2s ease;
+}
+
+.json-editor textarea:hover {
+  border-color: var(--text-secondary);
 }
 
 .json-editor textarea:focus {
   outline: none;
   border-color: var(--primary-color);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color), transparent 80%);
+  background: var(--bg-secondary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
 }
 
 /* Utility classes used in components if not using Tailwind */
@@ -42,4 +48,3 @@
 .text-lg { font-size: 1.125rem; }
 .font-bold { font-weight: 700; }
 .text-primary { color: var(--primary-color); }
-
