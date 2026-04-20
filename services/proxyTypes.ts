@@ -4,7 +4,14 @@ export type ProxyTarget = {
   udp?: number;
   urlProtocol?: 'http' | 'https';
   urlBasePath?: string;
+  mountPath?: string;
   originalUrl?: string;
+};
+
+export type HttpTargetMapping = {
+  path: string;
+  target: ProxyTarget;
+  targets?: ProxyTarget[];
 };
 
 export type ListenerHttpsConfig = {
@@ -25,6 +32,7 @@ export type ListenerRule = {
   webhook?: string;
   target: ProxyTarget;
   targets?: ProxyTarget[];
+  httpMappings?: HttpTargetMapping[];
 };
 
 export type ProxyConfig = {

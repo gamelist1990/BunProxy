@@ -8,8 +8,8 @@ import {
   rewriteBedrockUnconnectedPongTimestamp,
   rewriteBedrockUnconnectedPongPorts,
 } from '../services/bedrockPong.js';
-import { loadConfig } from '../services/proxyConfig.js';
-import { rewriteHttpRequest, rewriteHttpResponse } from '../services/httpProxyRewrite.js';
+import { getHttpMappedTargetsForPath, loadConfig } from '../services/proxyConfig.js';
+import { getHttpRequestPath, rewriteHttpRequest, rewriteHttpResponse } from '../services/httpProxyRewrite.js';
 import { generateProxyProtocolV2Header } from '../services/proxyProtocolBuilder.js';
 import { resolveListenerTlsCredentials } from '../services/tlsConfig.js';
 import {
@@ -400,6 +400,91 @@ describe('TCP PROXY protocol forwarding', () => {
     ).toString('latin1');
 
     expect(rewritten).toContain('Location: /docs/start');
+  });
+
+  test('maps HTTP paths to the longest configured route target', () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'bunproxy-config-'));
+    const configPath = path.join(tempDir, 'config.yml');
+
+    fs.writeFileSync(configPath, [
+      'listeners:',
+      '  - bind: 0.0.0.0',
+      '    tcp: 443',
+      '    https:',
+      '      enabled: true',
+      '    target:',
+      '      host: https://root.example.com/',
+      '    httpMappings:',
+      '      - path: /',
+      '        target:',
+      '          host: https://landing.example.com/site',
+      '      - path: /pages',
+      '        target:',
+      '          host: https://pages.example.com/docs',
+    ].join('\n'));
+
+    const config = loadConfig(configPath);
+    const listener = config.listeners[0]!;
+    const request = Buffer.from([
+      'GET /pages/start?lang=ja HTTP/1.1',
+      'Host: proxy.example.com',
+      '',
+      '',
+    ].join('\r\n'), 'latin1');
+    const requestPath = getHttpRequestPath(request);
+    const [target] = getHttpMappedTargetsForPath(listener, 'tcp', requestPath);
+
+    expect(requestPath).toBe('/pages/start');
+    expect(target).toEqual(expect.objectContaining({
+      host: 'pages.example.com',
+      tcp: 443,
+      urlProtocol: 'https',
+      urlBasePath: '/docs',
+      mountPath: '/pages',
+    }));
+  });
+
+  test('rewrites mapped HTTP requests by stripping the external mount path', () => {
+    const rewritten = rewriteHttpRequest(
+      Buffer.from([
+        'GET /pages/start?lang=ja HTTP/1.1',
+        'Host: proxy.example.com',
+        '',
+        '',
+      ].join('\r\n'), 'latin1'),
+      {
+        host: 'pages.example.com',
+        tcp: 443,
+        urlProtocol: 'https',
+        urlBasePath: '/docs',
+        mountPath: '/pages',
+      },
+      'https'
+    ).toString('latin1');
+
+    expect(rewritten).toContain('GET /docs/start?lang=ja HTTP/1.1');
+    expect(rewritten).toContain('Host: pages.example.com');
+  });
+
+  test('rewrites mapped backend redirects back under the external mount path', () => {
+    const rewritten = rewriteHttpResponse(
+      Buffer.from([
+        'HTTP/1.1 302 Found',
+        'Location: https://pages.example.com/docs/start',
+        'Content-Length: 0',
+        '',
+        '',
+      ].join('\r\n'), 'latin1'),
+      {
+        host: 'pages.example.com',
+        tcp: 443,
+        urlProtocol: 'https',
+        urlBasePath: '/docs',
+        mountPath: '/pages',
+      }
+    ).toString('latin1');
+
+    expect(rewritten).toContain('Location: /pages/start');
   });
 
   test('parses listener HTTPS settings from config', () => {

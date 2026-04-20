@@ -19,3 +19,12 @@ listeners:
       - host: 127.0.0.1
         tcp: 19132
         udp: 19132
+    # Optional HTTP/HTTPS path mappings. The longest matching path wins.
+    # /pages/example is routed to /pages before /.
+    httpMappings:
+      - path: /
+        target:
+          host: https://example.com/
+      - path: /pages
+        target:
+          host: https://example.com/docs

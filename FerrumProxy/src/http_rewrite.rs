@@ -12,6 +12,25 @@ pub fn is_likely_http_request(buf: &[u8]) -> bool {
     HTTP_METHODS.contains(&method)
 }
 
+pub fn http_request_path(buf: &[u8]) -> Option<String> {
+    let head_end = header_end(buf).unwrap_or(buf.len().min(1024));
+    let head = String::from_utf8_lossy(&buf[..head_end]);
+    let request_line = head.split("\r\n").next().unwrap_or_default();
+    let parts = request_line.split_whitespace().collect::<Vec<_>>();
+    if parts.len() != 3 || !parts[2].starts_with("HTTP/1.") {
+        return None;
+    }
+
+    if parts[1].starts_with("http://") || parts[1].starts_with("https://") {
+        return url::Url::parse(parts[1])
+            .ok()
+            .map(|parsed| parsed.path().to_string());
+    }
+
+    let path = parts[1].split_once('?').map_or(parts[1], |(path, _)| path);
+    path.starts_with('/').then(|| path.to_string())
+}
+
 pub fn rewrite_http_request(buf: &[u8], target: &ProxyTarget, forwarded_proto: &str) -> Vec<u8> {
     let Some(head_end) = header_end(buf) else {
         return buf.to_vec();
@@ -29,7 +48,11 @@ pub fn rewrite_http_request(buf: &[u8], target: &ProxyTarget, forwarded_proto: &
         return buf.to_vec();
     }
 
-    let rewritten_target = normalize_proxy_path(target.url_base_path.as_deref(), parts[1]);
+    let rewritten_target = normalize_proxy_path(
+        target.url_base_path.as_deref(),
+        parts[1],
+        target.mount_path.as_deref(),
+    );
     let mut rewritten = vec![format!("{} {} {}", parts[0], rewritten_target, parts[2])];
     let mut host_seen = false;
     let mut original_host = None;
@@ -84,7 +107,22 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
         .as_deref()
         .filter(|path| *path != "/")
         .unwrap_or("");
+    let mount_path = target
+        .mount_path
+        .as_deref()
+        .filter(|path| *path != "/")
+        .unwrap_or("");
     let origin_with_base = format!("{origin}{base_path}");
+
+    let to_proxy_path = |path: &str| -> String {
+        if mount_path.is_empty() {
+            return path.to_string();
+        }
+        if path == "/" {
+            return mount_path.to_string();
+        }
+        format!("{mount_path}{path}")
+    };
 
     let rewritten_lines = head
         .split("\r\n")
@@ -96,15 +134,22 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
 
             let location = line[9..].trim();
             if location == origin_with_base || location == format!("{origin_with_base}/") {
-                return "Location: /".to_string();
+                return format!("Location: {}", to_proxy_path("/"));
             }
             if !base_path.is_empty() && location.starts_with(&format!("{origin_with_base}/")) {
-                return format!("Location: {}", &location[origin_with_base.len()..]);
+                return format!(
+                    "Location: {}",
+                    to_proxy_path(&location[origin_with_base.len()..])
+                );
             }
             if location == origin {
                 return format!(
                     "Location: {}",
-                    if base_path.is_empty() { "/" } else { base_path }
+                    to_proxy_path(if base_path.is_empty() {
+                        "/"
+                    } else {
+                        base_path
+                    })
                 );
             }
             format!("Location: {location}")
@@ -117,7 +162,11 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
     out
 }
 
-fn normalize_proxy_path(base_path: Option<&str>, request_target: &str) -> String {
+fn normalize_proxy_path(
+    base_path: Option<&str>,
+    request_target: &str,
+    mount_path: Option<&str>,
+) -> String {
     if request_target.starts_with("http://") || request_target.starts_with("https://") {
         if let Ok(parsed) = url::Url::parse(request_target) {
             return normalize_proxy_path(
@@ -127,6 +176,7 @@ fn normalize_proxy_path(base_path: Option<&str>, request_target: &str) -> String
                     parsed.path(),
                     parsed.query().map(|q| format!("?{q}")).unwrap_or_default()
                 ),
+                mount_path,
             );
         }
     }
@@ -143,23 +193,39 @@ fn normalize_proxy_path(base_path: Option<&str>, request_target: &str) -> String
         .map(|path| path.trim_end_matches('/'))
         .unwrap_or("");
 
+    let mounted_path = strip_mount_path(path_part, mount_path);
+
     let rewritten_path = if !normalized_base.is_empty()
         && path_part != normalized_base
         && !path_part.starts_with(&format!("{normalized_base}/"))
     {
-        if path_part == "/" {
+        if mounted_path == "/" {
             format!("{normalized_base}/")
         } else {
-            format!("{normalized_base}{path_part}")
+            format!("{normalized_base}{mounted_path}")
         }
     } else {
-        path_part.to_string()
+        mounted_path
     };
 
     match query_part {
         Some(query) => format!("{rewritten_path}?{query}"),
         None => rewritten_path,
     }
+}
+
+fn strip_mount_path(path_part: &str, mount_path: Option<&str>) -> String {
+    let Some(mount_path) = mount_path.filter(|path| *path != "/") else {
+        return path_part.to_string();
+    };
+    let normalized_mount = mount_path.trim_end_matches('/');
+    if path_part == normalized_mount {
+        return "/".to_string();
+    }
+    if let Some(stripped) = path_part.strip_prefix(&format!("{normalized_mount}/")) {
+        return format!("/{stripped}");
+    }
+    path_part.to_string()
 }
 
 fn header_end(buf: &[u8]) -> Option<usize> {

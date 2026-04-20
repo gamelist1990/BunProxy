@@ -12,7 +12,9 @@ use tokio_rustls::TlsConnector;
 use tracing::{debug, info, warn};
 
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
-use crate::http_rewrite::{is_likely_http_request, rewrite_http_request, rewrite_http_response};
+use crate::http_rewrite::{
+    http_request_path, is_likely_http_request, rewrite_http_request, rewrite_http_response,
+};
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
 use crate::tls_config::resolve_tls_acceptor;
@@ -102,7 +104,13 @@ async fn handle_client(
         "http"
     };
 
-    let targets = rule.targets_for(Protocol::Tcp);
+    let mapped_targets =
+        rule.http_targets_for_path(Protocol::Tcp, http_request_path(initial_payload).as_deref());
+    let targets = if mapped_targets.is_empty() {
+        rule.targets_for(Protocol::Tcp)
+    } else {
+        mapped_targets
+    };
     let mut last_error = None;
 
     for target in targets {

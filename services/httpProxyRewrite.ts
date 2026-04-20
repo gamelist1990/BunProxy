@@ -16,7 +16,22 @@ function getHeaderEndIndex(buffer: Buffer) {
   return buffer.indexOf('\r\n\r\n');
 }
 
-function normalizeProxyPath(basePath: string | undefined, requestTarget: string) {
+function stripMountPath(pathPart: string, mountPath: string | undefined) {
+  if (!mountPath || mountPath === '/') {
+    return pathPart;
+  }
+
+  const normalizedMount = mountPath.replace(/\/+$/, '');
+  if (pathPart === normalizedMount) {
+    return '/';
+  }
+  if (pathPart.startsWith(`${normalizedMount}/`)) {
+    return pathPart.slice(normalizedMount.length) || '/';
+  }
+  return pathPart;
+}
+
+function normalizeProxyPath(basePath: string | undefined, requestTarget: string, mountPath?: string) {
   const [pathPartRaw, queryPart] = requestTarget.split('?', 2);
   let pathPart = pathPartRaw || '/';
 
@@ -24,7 +39,7 @@ function normalizeProxyPath(basePath: string | undefined, requestTarget: string)
     try {
       const parsed = new URL(requestTarget);
       pathPart = parsed.pathname || '/';
-      return normalizeProxyPath(basePath, `${pathPart}${parsed.search}`);
+      return normalizeProxyPath(basePath, `${pathPart}${parsed.search}`, mountPath);
     } catch {
       return requestTarget;
     }
@@ -40,9 +55,9 @@ function normalizeProxyPath(basePath: string | undefined, requestTarget: string)
       : basePath
     : '';
 
-  let rewrittenPath = pathPart;
+  let rewrittenPath = stripMountPath(pathPart, mountPath);
   if (normalizedBase !== '' && pathPart !== normalizedBase && !pathPart.startsWith(`${normalizedBase}/`)) {
-    rewrittenPath = pathPart === '/' ? `${normalizedBase}/` : `${normalizedBase}${pathPart}`;
+    rewrittenPath = rewrittenPath === '/' ? `${normalizedBase}/` : `${normalizedBase}${rewrittenPath}`;
   }
 
   return queryPart === undefined ? rewrittenPath : `${rewrittenPath}?${queryPart}`;
@@ -54,6 +69,28 @@ export function isLikelyHttpRequest(buffer: Buffer) {
   const firstLine = head.split('\r\n', 1)[0] ?? '';
   const [method] = firstLine.split(' ', 1);
   return HTTP_METHODS.has(method ?? '');
+}
+
+export function getHttpRequestPath(buffer: Buffer) {
+  const headerEnd = getHeaderEndIndex(buffer);
+  const head = buffer.subarray(0, headerEnd >= 0 ? headerEnd : Math.min(buffer.length, 1024)).toString('latin1');
+  const requestLine = head.split('\r\n', 1)[0] ?? '';
+  const match = requestLine.match(/^[A-Z]+\s+(\S+)\s+HTTP\/1\.[01]$/);
+  if (!match) {
+    return undefined;
+  }
+
+  const requestTarget = match[1];
+  if (/^https?:\/\//i.test(requestTarget)) {
+    try {
+      return new URL(requestTarget).pathname || '/';
+    } catch {
+      return undefined;
+    }
+  }
+
+  const [pathPart] = requestTarget.split('?', 1);
+  return pathPart.startsWith('/') ? pathPart : undefined;
 }
 
 export function rewriteHttpRequest(buffer: Buffer, target: ProxyTarget, forwardedProto: 'http' | 'https' = 'http') {
@@ -76,7 +113,7 @@ export function rewriteHttpRequest(buffer: Buffer, target: ProxyTarget, forwarde
   }
 
   const [, method, requestTarget, version] = match;
-  const rewrittenTarget = normalizeProxyPath(target.urlBasePath, requestTarget);
+  const rewrittenTarget = normalizeProxyPath(target.urlBasePath, requestTarget, target.mountPath);
   const rewrittenLines: string[] = [`${method} ${rewrittenTarget} ${version}`];
   let hostSeen = false;
   let originalHost: string | undefined;
@@ -117,20 +154,30 @@ export function rewriteHttpResponse(buffer: Buffer, target: ProxyTarget) {
   const origin = `${target.urlProtocol}://${target.host}`;
   const basePath = target.urlBasePath && target.urlBasePath !== '/' ? target.urlBasePath : '';
   const originWithBase = `${origin}${basePath}`;
+  const mountPath = target.mountPath && target.mountPath !== '/' ? target.mountPath : '';
+  const toProxyPath = (path: string) => {
+    if (mountPath === '') {
+      return path;
+    }
+    if (path === '/') {
+      return mountPath;
+    }
+    return `${mountPath}${path}`;
+  };
 
   const rewrittenHead = head.replace(/^Location:\s*(.+)$/gim, (_line, rawLocation: string) => {
     const location = rawLocation.trim();
     if (location === originWithBase) {
-      return 'Location: /';
+      return `Location: ${toProxyPath('/')}`;
     }
     if (location === `${originWithBase}/`) {
-      return 'Location: /';
+      return `Location: ${toProxyPath('/')}`;
     }
     if (basePath !== '' && location.startsWith(`${originWithBase}/`)) {
-      return `Location: ${location.slice(originWithBase.length)}`;
+      return `Location: ${toProxyPath(location.slice(originWithBase.length))}`;
     }
     if (location === origin) {
-      return `Location: ${basePath || '/'}`;
+      return `Location: ${toProxyPath(basePath || '/')}`;
     }
     return `Location: ${location}`;
   });

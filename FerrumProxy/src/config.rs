@@ -44,6 +44,8 @@ pub struct ListenerRule {
     pub target: Option<ProxyTarget>,
     #[serde(default)]
     pub targets: Vec<ProxyTarget>,
+    #[serde(default)]
+    pub http_mappings: Vec<HttpTargetMapping>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,7 +58,19 @@ pub struct ProxyTarget {
     #[serde(skip)]
     pub url_base_path: Option<String>,
     #[serde(skip)]
+    pub mount_path: Option<String>,
+    #[serde(skip)]
     pub original_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpTargetMapping {
+    pub path: String,
+    #[serde(default)]
+    pub target: Option<ProxyTarget>,
+    #[serde(default)]
+    pub targets: Vec<ProxyTarget>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +107,10 @@ impl ProxyConfig {
 
             for target in &mut listener.targets {
                 target.normalize_url_host();
+            }
+
+            for mapping in &mut listener.http_mappings {
+                mapping.normalize();
             }
         }
     }
@@ -148,6 +166,37 @@ impl ListenerRule {
         });
         targets
     }
+
+    pub fn http_targets_for_path(
+        &self,
+        protocol: Protocol,
+        request_path: Option<&str>,
+    ) -> Vec<ProxyTarget> {
+        let Some(request_path) = request_path else {
+            return Vec::new();
+        };
+
+        let Some(mapping) = self
+            .http_mappings
+            .iter()
+            .filter(|mapping| path_matches_mapping(request_path, &mapping.path))
+            .max_by_key(|mapping| mapping.path.len())
+        else {
+            return Vec::new();
+        };
+
+        let mut targets = if mapping.targets.is_empty() {
+            mapping.target.iter().cloned().collect::<Vec<_>>()
+        } else {
+            mapping.targets.clone()
+        };
+
+        targets.retain(|target| match protocol {
+            Protocol::Tcp => target.tcp.is_some(),
+            Protocol::Udp => target.udp.is_some(),
+        });
+        targets
+    }
 }
 
 impl ProxyTarget {
@@ -184,6 +233,36 @@ impl ProxyTarget {
             self.udp = port;
         }
     }
+}
+
+impl HttpTargetMapping {
+    fn normalize(&mut self) {
+        self.path = normalize_mapping_path(&self.path);
+
+        if let Some(target) = &mut self.target {
+            target.normalize_url_host();
+            target.mount_path = Some(self.path.clone());
+        }
+
+        for target in &mut self.targets {
+            target.normalize_url_host();
+            target.mount_path = Some(self.path.clone());
+        }
+    }
+}
+
+fn normalize_mapping_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed == "/" {
+        return "/".to_string();
+    }
+    format!("/{}", trimmed.trim_start_matches('/').trim_end_matches('/'))
+}
+
+fn path_matches_mapping(request_path: &str, mapping_path: &str) -> bool {
+    mapping_path == "/"
+        || request_path == mapping_path
+        || request_path.starts_with(&format!("{mapping_path}/"))
 }
 
 fn default_endpoint() -> u16 {

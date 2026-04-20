@@ -46,6 +46,15 @@ export const ListenerList: React.FC<ListenerListProps> = ({ instanceId, listener
     onChange(newListeners);
   };
 
+  const handleHttpMappingsChange = (index: number, httpMappings: NonNullable<ListenerConfig['httpMappings']>) => {
+    const newListeners = [...listeners];
+    newListeners[index] = syncListenerTargets({
+      ...newListeners[index],
+      httpMappings,
+    });
+    onChange(newListeners);
+  };
+
   const addListener = () => {
     const newListeners = [...listeners];
     newListeners.push({
@@ -64,6 +73,7 @@ export const ListenerList: React.FC<ListenerListProps> = ({ instanceId, listener
       rewriteBedrockPongPorts: true,
       target: createDefaultTarget(),
       targets: [createDefaultTarget()],
+      httpMappings: [],
     });
     onChange(newListeners);
   };
@@ -99,6 +109,7 @@ export const ListenerList: React.FC<ListenerListProps> = ({ instanceId, listener
             listener={syncListenerTargets(listener)}
             onChange={(field, value) => handleListenerChange(index, field, value)}
             onTargetsChange={(targets) => handleTargetsChange(index, targets)}
+            onHttpMappingsChange={(mappings) => handleHttpMappingsChange(index, mappings)}
             onRemove={listeners.length > 1 ? () => removeListener(index) : undefined}
           />
         ))

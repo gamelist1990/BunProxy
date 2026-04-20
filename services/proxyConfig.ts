@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import YAML from 'yaml';
-import type { ListenerHttpsConfig, ListenerRule, ProxyConfig, ProxyTarget } from './proxyTypes.js';
+import type { HttpTargetMapping, ListenerHttpsConfig, ListenerRule, ProxyConfig, ProxyTarget } from './proxyTypes.js';
 
 export const CONFIG_FILE = path.join(process.cwd(), 'config.yml');
 
@@ -122,6 +122,49 @@ function normalizeTarget(target: unknown, fieldName: string): ProxyTarget {
   };
 }
 
+function normalizeHttpMappingPath(value: unknown, fieldName: string) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${fieldName}.path must be a non-empty path starting with /`);
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('/')) {
+    throw new Error(`${fieldName}.path must start with /`);
+  }
+
+  return trimmed === '/' ? '/' : trimmed.replace(/\/+$/, '');
+}
+
+function normalizeHttpMapping(mapping: unknown, fieldName: string): HttpTargetMapping {
+  if (!mapping || typeof mapping !== 'object') {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const candidate = mapping as Record<string, unknown>;
+  const mappingPath = normalizeHttpMappingPath(candidate.path, fieldName);
+  const targets = Array.isArray(candidate.targets)
+    ? candidate.targets.map((target, targetIndex) =>
+        normalizeTarget(target, `${fieldName}.targets[${targetIndex}]`))
+    : candidate.target
+      ? [normalizeTarget(candidate.target, `${fieldName}.target`)]
+      : [];
+
+  if (targets.length === 0) {
+    throw new Error(`${fieldName} must define target or targets`);
+  }
+
+  const mountedTargets = targets.map((target) => ({
+    ...target,
+    mountPath: mappingPath,
+  }));
+
+  return {
+    path: mappingPath,
+    target: mountedTargets[0],
+    targets: mountedTargets,
+  };
+}
+
 function normalizeHttpsConfig(value: unknown, fieldName: string): ListenerHttpsConfig | undefined {
   if (value === undefined || value === null) {
     return undefined;
@@ -160,6 +203,35 @@ export function getTargetsForProtocol(rule: ListenerRule, protocol: 'tcp' | 'udp
   return baseTargets.filter((target) => target[protocol] !== undefined);
 }
 
+function pathMatchesMapping(requestPath: string, mappingPath: string) {
+  return mappingPath === '/'
+    || requestPath === mappingPath
+    || requestPath.startsWith(`${mappingPath}/`);
+}
+
+export function getHttpMappedTargetsForPath(
+  rule: ListenerRule,
+  protocol: 'tcp' | 'udp',
+  requestPath: string | undefined,
+) {
+  if (!requestPath || !Array.isArray(rule.httpMappings) || rule.httpMappings.length === 0) {
+    return [];
+  }
+
+  const best = rule.httpMappings
+    .filter((mapping) => pathMatchesMapping(requestPath, mapping.path))
+    .sort((left, right) => right.path.length - left.path.length)[0];
+
+  if (!best) {
+    return [];
+  }
+
+  const targets = Array.isArray(best.targets) && best.targets.length > 0
+    ? best.targets
+    : [best.target];
+  return targets.filter((target) => target[protocol] !== undefined);
+}
+
 export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
   if (!fs.existsSync(configFile)) {
     writeDefaultConfig(configFile);
@@ -184,10 +256,15 @@ export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
       : rule.target
         ? [normalizeTarget(rule.target, `listeners[${index}].target`)]
         : [];
+    const normalizedHttpMappings = Array.isArray(rule.httpMappings)
+      ? rule.httpMappings.map((mapping, mappingIndex) =>
+          normalizeHttpMapping(mapping, `listeners[${index}].httpMappings[${mappingIndex}]`))
+      : [];
 
-    if (normalizedTargets.length === 0) {
-      throw new Error(`listeners[${index}] must define target or targets`);
+    if (normalizedTargets.length === 0 && normalizedHttpMappings.length === 0) {
+      throw new Error(`listeners[${index}] must define target, targets, or httpMappings`);
     }
+    const firstTarget = normalizedTargets[0] ?? normalizedHttpMappings[0]?.target;
 
     return {
       ...rule,
@@ -198,8 +275,9 @@ export function loadConfig(configFile = CONFIG_FILE): ProxyConfig {
       rewriteBedrockPongPorts: typeof rule.rewriteBedrockPongPorts === 'boolean'
         ? rule.rewriteBedrockPongPorts
         : true,
-      target: normalizedTargets[0],
+      target: firstTarget,
       targets: normalizedTargets,
+      httpMappings: normalizedHttpMappings,
     } as ListenerRule;
   });
 

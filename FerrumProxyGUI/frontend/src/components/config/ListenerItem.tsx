@@ -12,6 +12,7 @@ interface ListenerItemProps {
   listener: ListenerConfig;
   onChange: <K extends keyof ListenerConfig>(field: K, value: ListenerConfig[K]) => void;
   onTargetsChange: (targets: NonNullable<ListenerConfig['targets']>) => void;
+  onHttpMappingsChange: (mappings: NonNullable<ListenerConfig['httpMappings']>) => void;
   onRemove?: () => void;
 }
 
@@ -19,6 +20,20 @@ const createEmptyTarget = () => ({
   host: '',
   tcp: undefined,
   udp: undefined,
+});
+
+const createEmptyHttpMapping = () => ({
+  path: '/',
+  target: {
+    host: '',
+    tcp: undefined,
+    udp: undefined,
+  },
+  targets: [{
+    host: '',
+    tcp: undefined,
+    udp: undefined,
+  }],
 });
 
 const parseOptionalPort = (value: string): number | undefined => {
@@ -35,6 +50,7 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
   listener,
   onChange,
   onTargetsChange,
+  onHttpMappingsChange,
   onRemove,
 }) => {
   const [certFile, setCertFile] = useState<File | null>(null);
@@ -45,6 +61,7 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
     : listener.target
       ? [listener.target]
       : [createEmptyTarget()];
+  const httpMappings = listener.httpMappings ?? [];
 
   const handleTargetChange = (targetIndex: number, field: 'host' | 'tcp' | 'udp', value: string | number | undefined) => {
     const nextTargets = targets.map((target, currentIndex) => (
@@ -60,6 +77,34 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
   const removeTarget = (targetIndex: number) => {
     const nextTargets = targets.filter((_, currentIndex) => currentIndex !== targetIndex);
     onTargetsChange(nextTargets.length > 0 ? nextTargets : [createEmptyTarget()]);
+  };
+
+  const addHttpMapping = () => {
+    onHttpMappingsChange([...httpMappings, createEmptyHttpMapping()]);
+  };
+
+  const updateHttpMapping = (
+    mappingIndex: number,
+    field: 'path' | 'host' | 'tcp',
+    value: string | number | undefined,
+  ) => {
+    const nextMappings = httpMappings.map((mapping, currentIndex) => {
+      if (currentIndex !== mappingIndex) {
+        return mapping;
+      }
+
+      const target = mapping.targets?.[0] ?? mapping.target ?? createEmptyTarget();
+      if (field === 'path') {
+        return { ...mapping, path: String(value ?? '/') };
+      }
+      const nextTarget = { ...target, [field]: value };
+      return { ...mapping, target: nextTarget, targets: [nextTarget] };
+    });
+    onHttpMappingsChange(nextMappings);
+  };
+
+  const removeHttpMapping = (mappingIndex: number) => {
+    onHttpMappingsChange(httpMappings.filter((_, currentIndex) => currentIndex !== mappingIndex));
   };
 
   const handleTlsBundleUpload = async () => {
@@ -289,6 +334,64 @@ export const ListenerItem: React.FC<ListenerItemProps> = ({
       <Button variant="ghost" onClick={addTarget}>
         + {t('addTargetServer') || 'Add Target Server'}
       </Button>
+
+      {(listener.tcp || listener.https?.enabled) && (
+        <>
+          <div className="ui-divider">
+            <span className="ui-divider-label">{t('httpPathMappings') || 'HTTP Path Mappings'}</span>
+          </div>
+
+          <p className="text-sm text-secondary mb-4">
+            {t('httpPathMappingsHint') || 'For HTTP/HTTPS traffic, the longest matching path is routed first. Choose paths carefully when they overlap.'}
+          </p>
+
+          {httpMappings.map((mapping, mappingIndex) => {
+            const target = mapping.targets?.[0] ?? mapping.target ?? createEmptyTarget();
+            return (
+              <div key={mappingIndex} className="mb-4">
+                <div className="flex justify-between items-center mb-2">
+                  <strong className="text-primary">
+                    {(t('httpPathMapping') || 'HTTP Mapping')} #{mappingIndex + 1}
+                  </strong>
+                  <Button
+                    variant="danger"
+                    onClick={() => removeHttpMapping(mappingIndex)}
+                    style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
+                  >
+                    {t('remove') || 'Remove'}
+                  </Button>
+                </div>
+
+                <div className="ui-grid">
+                  <Input
+                    label={t('externalPath') || 'External Path'}
+                    value={mapping.path || '/'}
+                    onChange={(e) => updateHttpMapping(mappingIndex, 'path', e.target.value)}
+                    placeholder="/"
+                  />
+                  <Input
+                    label={t('targetUrl') || 'Target URL'}
+                    value={target.host || ''}
+                    onChange={(e) => updateHttpMapping(mappingIndex, 'host', e.target.value)}
+                    placeholder="https://example.com/base"
+                  />
+                  <Input
+                    label="Target TCP Port"
+                    type="number"
+                    value={target.tcp || ''}
+                    onChange={(e) => updateHttpMapping(mappingIndex, 'tcp', parseOptionalPort(e.target.value))}
+                    placeholder="auto"
+                  />
+                </div>
+              </div>
+            );
+          })}
+
+          <Button variant="ghost" onClick={addHttpMapping}>
+            + {t('addHttpPathMapping') || 'Add HTTP Mapping'}
+          </Button>
+        </>
+      )}
     </Card>
   );
 };
