@@ -145,11 +145,7 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
             if location == origin {
                 return format!(
                     "Location: {}",
-                    to_proxy_path(if base_path.is_empty() {
-                        "/"
-                    } else {
-                        base_path
-                    })
+                    to_proxy_path(if base_path.is_empty() { "/" } else { base_path })
                 );
             }
             format!("Location: {location}")

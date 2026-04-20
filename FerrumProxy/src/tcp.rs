@@ -61,7 +61,9 @@ pub async fn start_tcp_proxy(rule: Arc<ListenerRule>, runtime: Arc<AppRuntime>) 
             let result = match client {
                 Ok(client) => {
                     runtime.metrics.tcp_session_opened();
-                    let result = handle_client(client, client_addr, Arc::clone(&rule), Arc::clone(&runtime)).await;
+                    let result =
+                        handle_client(client, client_addr, Arc::clone(&rule), Arc::clone(&runtime))
+                            .await;
                     runtime.metrics.tcp_session_closed();
                     result
                 }

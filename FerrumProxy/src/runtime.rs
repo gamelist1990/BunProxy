@@ -140,11 +140,11 @@ impl ProtocolMetrics {
     }
 
     fn session_closed(&self) {
-        self.active_sessions.fetch_update(
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-            |current| current.checked_sub(1),
-        ).ok();
+        self.active_sessions
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                current.checked_sub(1)
+            })
+            .ok();
     }
 
     fn client_to_target_bytes(&self, bytes: usize) {

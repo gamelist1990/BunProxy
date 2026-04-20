@@ -201,7 +201,9 @@ async fn create_session(
                         error!("UDP response send to {peer} failed: {err}");
                         break;
                     }
-                    recv_runtime.metrics.udp_target_to_client_bytes(response.len());
+                    recv_runtime
+                        .metrics
+                        .udp_target_to_client_bytes(response.len());
                     debug!("UDP {backend_addr} -> {peer} {}B", response.len());
                 }
                 Ok(Err(err)) => {
