@@ -14,8 +14,8 @@ use tracing::{debug, info, warn};
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
 use crate::dns_cache::DnsCache;
 use crate::http_rewrite::{
-    expected_response_total_len_if_rewrite_needed, is_likely_http_request, rewrite_http_request,
-    rewrite_http_response,
+    expected_response_total_len_if_rewrite_needed_with_head_end, is_likely_http_request,
+    rewrite_http_request, rewrite_http_response,
 };
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
@@ -268,10 +268,13 @@ async fn copy_bidirectional(
             }
 
             pending.extend_from_slice(&buf[..len]);
-            if pending.windows(4).position(|window| window == b"\r\n\r\n").is_some() {
+            if let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
                 if expected_total_len.is_none() {
-                    expected_total_len =
-                        expected_response_total_len_if_rewrite_needed(&pending, &response_target_config);
+                    expected_total_len = expected_response_total_len_if_rewrite_needed_with_head_end(
+                        &pending,
+                        header_end,
+                        &response_target_config,
+                    );
                 }
                 if let Some(expected_total_len) = expected_total_len {
                     if pending.len() < expected_total_len {

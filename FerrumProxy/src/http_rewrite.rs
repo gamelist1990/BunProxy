@@ -5,6 +5,10 @@ use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use flate2::write::{GzEncoder, ZlibEncoder};
 use flate2::Compression;
 
+const BROTLI_BUFFER_SIZE: usize = 4096;
+const BROTLI_QUALITY: u32 = 5;
+const BROTLI_LGWIN: u32 = 22;
+
 const HTTP_METHODS: &[&str] = &[
     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
 ];
@@ -141,14 +145,29 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
     if !body.is_empty() && !is_chunked && is_text_like {
         if let Some(decoded) = decode_body(body, &content_encoding) {
             let mut rewritten_text = String::from_utf8_lossy(&decoded).into_owned();
+            let mut changed = false;
             if !base_path.is_empty() {
-                rewritten_text = rewritten_text.replace(&format!("{origin_with_base}/"), "/");
-                rewritten_text = rewritten_text.replace(&origin_with_base, "/");
+                let from = format!("{origin_with_base}/");
+                if rewritten_text.contains(&from) {
+                    rewritten_text = rewritten_text.replace(&from, "/");
+                    changed = true;
+                }
+                if rewritten_text.contains(&origin_with_base) {
+                    rewritten_text = rewritten_text.replace(&origin_with_base, "/");
+                    changed = true;
+                }
             }
-            rewritten_text = rewritten_text.replace(&format!("{origin}/"), "/");
-            rewritten_text = rewritten_text.replace(&origin, "/");
+            let from = format!("{origin}/");
+            if rewritten_text.contains(&from) {
+                rewritten_text = rewritten_text.replace(&from, "/");
+                changed = true;
+            }
+            if rewritten_text.contains(&origin) {
+                rewritten_text = rewritten_text.replace(&origin, "/");
+                changed = true;
+            }
 
-            if rewritten_text.as_bytes() != decoded.as_slice() {
+            if changed {
                 if let Some(encoded) = encode_body(rewritten_text.as_bytes(), &content_encoding) {
                     rewritten_body = encoded;
                     set_header_value(&mut lines, "Content-Length", &rewritten_body.len().to_string());
@@ -167,11 +186,23 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
     out
 }
 
+#[cfg(test)]
 pub fn expected_response_total_len_if_rewrite_needed(buf: &[u8], target: &ProxyTarget) -> Option<usize> {
     if target.url_protocol.is_none() {
         return None;
     }
     let head_end = header_end(buf)?;
+    expected_response_total_len_if_rewrite_needed_with_head_end(buf, head_end, target)
+}
+
+pub fn expected_response_total_len_if_rewrite_needed_with_head_end(
+    buf: &[u8],
+    head_end: usize,
+    target: &ProxyTarget,
+) -> Option<usize> {
+    if target.url_protocol.is_none() {
+        return None;
+    }
     let head = String::from_utf8_lossy(&buf[..head_end]);
     let lines = head
         .split("\r\n")
@@ -315,7 +346,7 @@ fn decode_body(body: &[u8], encoding: &str) -> Option<Vec<u8>> {
             Some(raw_out)
         }
         "br" => {
-            let mut decoder = brotli::Decompressor::new(Cursor::new(body), 4096);
+            let mut decoder = brotli::Decompressor::new(Cursor::new(body), BROTLI_BUFFER_SIZE);
             let mut out = Vec::new();
             decoder.read_to_end(&mut out).ok()?;
             Some(out)
@@ -338,7 +369,8 @@ fn encode_body(body: &[u8], encoding: &str) -> Option<Vec<u8>> {
             encoder.finish().ok()
         }
         "br" => {
-            let mut writer = brotli::CompressorWriter::new(Vec::new(), 4096, 5, 22);
+            let mut writer =
+                brotli::CompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE, BROTLI_QUALITY, BROTLI_LGWIN);
             writer.write_all(body).ok()?;
             writer.flush().ok()?;
             Some(writer.into_inner())
