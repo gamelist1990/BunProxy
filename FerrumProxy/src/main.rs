@@ -30,6 +30,8 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    install_rustls_crypto_provider();
+
     let args = Args::parse();
     let cfg = config::ProxyConfig::load(&args.config)?;
     let filter = if cfg.debug {
@@ -104,4 +106,8 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn install_rustls_crypto_provider() {
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
