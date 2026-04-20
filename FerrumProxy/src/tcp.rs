@@ -13,7 +13,10 @@ use tracing::{debug, info, warn};
 
 use crate::config::{ListenerRule, Protocol, ProxyTarget};
 use crate::dns_cache::DnsCache;
-use crate::http_rewrite::{is_likely_http_request, rewrite_http_request, rewrite_http_response};
+use crate::http_rewrite::{
+    expected_response_total_len_if_rewrite_needed, is_likely_http_request, rewrite_http_request,
+    rewrite_http_response,
+};
 use crate::proxy_protocol::{build_proxy_v2_header, parse_proxy_chain};
 use crate::runtime::AppRuntime;
 use crate::tls_config::resolve_tls_acceptor;
@@ -249,6 +252,7 @@ async fn copy_bidirectional(
         let mut total = 0u64;
         let mut response_head_handled = response_target_config.url_protocol.is_none();
         let mut pending = Vec::new();
+        let mut expected_total_len: Option<usize> = None;
         let mut buf = vec![0u8; BUFFER_SIZE];
 
         loop {
@@ -264,8 +268,16 @@ async fn copy_bidirectional(
             }
 
             pending.extend_from_slice(&buf[..len]);
-            if let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
-                let _ = header_end;
+            if pending.windows(4).position(|window| window == b"\r\n\r\n").is_some() {
+                if expected_total_len.is_none() {
+                    expected_total_len =
+                        expected_response_total_len_if_rewrite_needed(&pending, &response_target_config);
+                }
+                if let Some(expected_total_len) = expected_total_len {
+                    if pending.len() < expected_total_len {
+                        continue;
+                    }
+                }
                 response_head_handled = true;
                 let rewritten = rewrite_http_response(&pending, &response_target_config);
                 client_write.write_all(&rewritten).await?;

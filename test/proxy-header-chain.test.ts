@@ -1,7 +1,6 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { gunzipSync, gzipSync } from 'zlib';
 import { describe, expect, test } from 'bun:test';
 import {
   inspectBedrockUnconnectedPong,
@@ -401,63 +400,6 @@ describe('TCP PROXY protocol forwarding', () => {
     ).toString('latin1');
 
     expect(rewritten).toContain('Location: /docs/start');
-  });
-
-  test('rewrites absolute origin URLs inside text/html response bodies', () => {
-    const html = '<a href="https://gamelist1990.github.io/PEXServerWebSite/docs/start">Docs</a>';
-    const rewritten = rewriteHttpResponse(
-      Buffer.from([
-        'HTTP/1.1 200 OK',
-        'Content-Type: text/html; charset=utf-8',
-        `Content-Length: ${Buffer.byteLength(html)}`,
-        '',
-        html,
-      ].join('\r\n'), 'latin1'),
-      {
-        host: 'gamelist1990.github.io',
-        tcp: 443,
-        urlProtocol: 'https',
-        urlBasePath: '/PEXServerWebSite',
-      }
-    ).toString('latin1');
-
-    expect(rewritten).toContain('href="/docs/start"');
-    expect(rewritten).not.toContain('https://gamelist1990.github.io/PEXServerWebSite');
-  });
-
-  test('rewrites absolute origin URLs inside gzip-compressed html bodies', () => {
-    const html = '<script src="https://gamelist1990.github.io/PEXServerWebSite/assets/app.js"></script>';
-    const compressed = gzipSync(Buffer.from(html, 'utf8'));
-    const rewrittenBuffer = rewriteHttpResponse(
-      Buffer.concat([
-        Buffer.from([
-          'HTTP/1.1 200 OK',
-          'Content-Type: text/html; charset=utf-8',
-          'Content-Encoding: gzip',
-          `Content-Length: ${compressed.length}`,
-          '',
-          '',
-        ].join('\r\n'), 'latin1'),
-        compressed,
-      ]),
-      {
-        host: 'gamelist1990.github.io',
-        tcp: 443,
-        urlProtocol: 'https',
-        urlBasePath: '/PEXServerWebSite',
-      }
-    );
-
-    const headerEnd = rewrittenBuffer.indexOf('\r\n\r\n');
-    expect(headerEnd).toBeGreaterThan(0);
-    const headers = rewrittenBuffer.subarray(0, headerEnd).toString('latin1');
-    const body = rewrittenBuffer.subarray(headerEnd + 4);
-    const decoded = gunzipSync(body).toString('utf8');
-
-    expect(headers).toContain('Content-Encoding: gzip');
-    expect(headers).toContain(`Content-Length: ${body.length}`);
-    expect(decoded).toContain('<script src="/assets/app.js"></script>');
-    expect(decoded).not.toContain('https://gamelist1990.github.io/PEXServerWebSite');
   });
 
   test('parses listener HTTPS settings from config', () => {

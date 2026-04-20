@@ -1,13 +1,4 @@
 import type { ProxyTarget } from './proxyTypes.js';
-import {
-  brotliCompressSync,
-  brotliDecompressSync,
-  deflateSync,
-  gunzipSync,
-  gzipSync,
-  inflateRawSync,
-  inflateSync,
-} from 'zlib';
 
 const HTTP_METHODS = new Set([
   'GET',
@@ -23,10 +14,6 @@ const HTTP_METHODS = new Set([
 
 function getHeaderEndIndex(buffer: Buffer) {
   return buffer.indexOf('\r\n\r\n');
-}
-
-function escapeRegex(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function normalizeProxyPath(basePath: string | undefined, requestTarget: string) {
@@ -126,167 +113,27 @@ export function rewriteHttpResponse(buffer: Buffer, target: ProxyTarget) {
   }
 
   const head = buffer.subarray(0, headerEnd).toString('latin1');
-  const originalBody = buffer.subarray(headerEnd + 4);
-  const headLines = head.split('\r\n');
-  const statusLine = headLines.shift();
-  if (!statusLine) {
-    return buffer;
-  }
-  const lines = headLines.slice();
+  const body = buffer.subarray(headerEnd + 4);
   const origin = `${target.urlProtocol}://${target.host}`;
   const basePath = target.urlBasePath && target.urlBasePath !== '/' ? target.urlBasePath : '';
   const originWithBase = `${origin}${basePath}`;
-  const originWithBaseSlashRegex = basePath !== '' ? new RegExp(`${escapeRegex(originWithBase)}/`, 'g') : null;
-  const originWithBaseBoundaryRegex = basePath !== '' ? new RegExp(`${escapeRegex(originWithBase)}(?=["'\\s<>]|$)`, 'g') : null;
-  const originSlashRegex = new RegExp(`${escapeRegex(origin)}/`, 'g');
-  const originBoundaryRegex = new RegExp(`${escapeRegex(origin)}(?=["'\\s<>]|$)`, 'g');
 
-  const rewriteLocationValue = (rawLocation: string) => {
+  const rewrittenHead = head.replace(/^Location:\s*(.+)$/gim, (_line, rawLocation: string) => {
     const location = rawLocation.trim();
     if (location === originWithBase) {
-      return '/';
+      return 'Location: /';
     }
     if (location === `${originWithBase}/`) {
-      return '/';
+      return 'Location: /';
     }
     if (basePath !== '' && location.startsWith(`${originWithBase}/`)) {
-      return location.slice(originWithBase.length);
+      return `Location: ${location.slice(originWithBase.length)}`;
     }
     if (location === origin) {
-      return basePath || '/';
+      return `Location: ${basePath || '/'}`;
     }
-    return location;
-  };
+    return `Location: ${location}`;
+  });
 
-  const getHeaderValue = (name: string) => {
-    const lower = name.toLowerCase();
-    for (const line of lines) {
-      const separator = line.indexOf(':');
-      if (separator < 0) {
-        continue;
-      }
-      if (line.slice(0, separator).trim().toLowerCase() === lower) {
-        return line.slice(separator + 1).trim();
-      }
-    }
-    return undefined;
-  };
-
-  const setHeaderValue = (name: string, value: string) => {
-    const lower = name.toLowerCase();
-    let replaced = false;
-    const filtered: string[] = [];
-    for (const line of lines) {
-      const separator = line.indexOf(':');
-      if (separator < 0) {
-        filtered.push(line);
-        continue;
-      }
-      if (line.slice(0, separator).trim().toLowerCase() === lower) {
-        if (!replaced) {
-          filtered.push(`${name}: ${value}`);
-          replaced = true;
-        }
-        continue;
-      }
-      filtered.push(line);
-    }
-    if (!replaced) {
-      filtered.push(`${name}: ${value}`);
-    }
-    lines.length = 0;
-    lines.push(...filtered);
-  };
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!/^location\s*:/i.test(line)) {
-      continue;
-    }
-    const location = line.replace(/^location\s*:/i, '').trim();
-    lines[i] = `Location: ${rewriteLocationValue(location)}`;
-  }
-
-  const contentType = getHeaderValue('Content-Type')?.toLowerCase() ?? '';
-  const transferEncoding = getHeaderValue('Transfer-Encoding')?.toLowerCase() ?? '';
-  const contentEncoding = (getHeaderValue('Content-Encoding') ?? 'identity').toLowerCase();
-  const isChunked = transferEncoding.includes('chunked');
-  const isTextLike = contentType.startsWith('text/')
-    || contentType.includes('javascript')
-    || contentType.includes('json')
-    || contentType.includes('xml')
-    || contentType.includes('svg');
-  const canRewriteBody = originalBody.length > 0 && !isChunked && isTextLike;
-
-  const decodeBody = (body: Buffer) => {
-    try {
-      if (contentEncoding === 'identity' || contentEncoding === '') {
-        return body;
-      }
-      if (contentEncoding === 'gzip' || contentEncoding === 'x-gzip') {
-        return gunzipSync(body);
-      }
-      if (contentEncoding === 'deflate') {
-        try {
-          return inflateSync(body);
-        } catch {
-          return inflateRawSync(body);
-        }
-      }
-      if (contentEncoding === 'br') {
-        return brotliDecompressSync(body);
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
-
-  const encodeBody = (body: Buffer) => {
-    try {
-      if (contentEncoding === 'identity' || contentEncoding === '') {
-        return body;
-      }
-      if (contentEncoding === 'gzip' || contentEncoding === 'x-gzip') {
-        return gzipSync(body);
-      }
-      if (contentEncoding === 'deflate') {
-        return deflateSync(body);
-      }
-      if (contentEncoding === 'br') {
-        return brotliCompressSync(body);
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  };
-
-  let rewrittenBody = originalBody;
-  if (canRewriteBody) {
-    const decodedBody = decodeBody(originalBody);
-    if (decodedBody) {
-      const decodedText = decodedBody.toString('utf8');
-      let bodyText = decodedText;
-      if (originWithBaseSlashRegex && originWithBaseBoundaryRegex) {
-        bodyText = bodyText
-          .replace(originWithBaseSlashRegex, '/')
-          .replace(originWithBaseBoundaryRegex, '/');
-      }
-      bodyText = bodyText
-        .replace(originSlashRegex, '/')
-        .replace(originBoundaryRegex, '/');
-
-      if (bodyText !== decodedText) {
-        const reEncoded = encodeBody(Buffer.from(bodyText, 'utf8'));
-        if (reEncoded) {
-          rewrittenBody = reEncoded;
-          setHeaderValue('Content-Length', String(rewrittenBody.length));
-        }
-      }
-    }
-  }
-
-  const rewrittenHead = `${statusLine}\r\n${lines.join('\r\n')}`;
-  return Buffer.concat([Buffer.from(`${rewrittenHead}\r\n\r\n`, 'latin1'), rewrittenBody]);
+  return Buffer.concat([Buffer.from(`${rewrittenHead}\r\n\r\n`, 'latin1'), body]);
 }
