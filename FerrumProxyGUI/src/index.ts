@@ -232,6 +232,12 @@ processManager.on('log', (instanceId: string, type: string, message: string) => 
 
 
 const restartAttempts: Map<string, { count: number; firstAttemptAt: number }> = new Map();
+const intentionalStops: Set<string> = new Set();
+
+function markIntentionalStop(instanceId: string): void {
+  intentionalStops.add(instanceId);
+  restartAttempts.delete(instanceId);
+}
 
 processManager.on('exit', async (instanceId: string, code: number, signal: string) => {
   
@@ -255,6 +261,11 @@ processManager.on('exit', async (instanceId: string, code: number, signal: strin
 
   
   try {
+    if (intentionalStops.delete(instanceId)) {
+      console.log(`Auto-restart: skipped ${instanceId} because it was stopped intentionally`);
+      return;
+    }
+
     if (instance && instance.autoRestart) {
       const now = Date.now();
       const info = restartAttempts.get(instanceId) || { count: 0, firstAttemptAt: now };
@@ -582,6 +593,7 @@ app.post('/api/instances', async (req, res) => {
 
       
       if (processManager.isRunning(instanceId)) {
+        markIntentionalStop(instanceId);
         processManager.stop(instanceId);
         console.log(chalk.green(`✓ Instance initialized and stopped`));
       }
@@ -625,6 +637,7 @@ app.delete('/api/instances/:id', async (req, res) => {
 
     
     if (processManager.isRunning(instanceId)) {
+      markIntentionalStop(instanceId);
       processManager.stop(instanceId, true);
     }
 
@@ -708,6 +721,7 @@ app.post('/api/instances/:id/stop', async (req, res) => {
       return res.status(400).json({ error: 'Instance is not running' });
     }
 
+    markIntentionalStop(instanceId);
     processManager.stop(instanceId);
 
     
@@ -744,6 +758,9 @@ app.post('/api/instances/:id/restart', async (req, res) => {
     }
 
     const useSudo = await shouldStartWithSudo(instance);
+    if (processManager.isRunning(instanceId)) {
+      markIntentionalStop(instanceId);
+    }
 
     const pid = await processManager.restart(instanceId, {
       binaryPath: instance.binaryPath,
@@ -1056,6 +1073,7 @@ app.post('/api/instances/:id/update', async (req, res) => {
     if (processManager.isRunning(instanceId)) {
       console.log(chalk.blue(`Instance ${instanceId} is running — stopping before update...`));
       try {
+        markIntentionalStop(instanceId);
         processManager.stop(instanceId, true);
 
         

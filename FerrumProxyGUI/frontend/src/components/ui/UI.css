@@ -69,7 +69,7 @@
 .ui-input {
   width: 100%;
   min-height: 2.3rem;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid var(--border-color);
   background: color-mix(in srgb, var(--bg-tertiary) 80%, transparent);
   color: var(--text-primary);
@@ -156,7 +156,7 @@
 
 .ui-button {
   min-height: 2.2rem;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid transparent;
   padding: 0.42rem 0.82rem;
   font-size: 0.8rem;

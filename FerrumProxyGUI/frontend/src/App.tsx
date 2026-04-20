@@ -633,9 +633,6 @@ function App() {
   return (
     <div className="app">
       <div className="app-shell">
-        <div className="ambient ambient-left" aria-hidden="true" />
-        <div className="ambient ambient-right" aria-hidden="true" />
-
         <header className="topbar">
           <div className="brand">
             <p className="brand-kicker">FerrumProxy Control Console</p>

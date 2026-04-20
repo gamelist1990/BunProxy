@@ -1,58 +1,70 @@
-@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Sora:wght@500;700;800&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Plus+Jakarta+Sans:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap");
 
 :root {
-  --bg-primary: #f4efe6;
-  --bg-secondary: #fff9ef;
-  --bg-tertiary: #ecdcc4;
-  --text-primary: #211b14;
-  --text-secondary: #4f4438;
-  --text-muted: #7c6c5a;
-  --border-color: #d5bda2;
+  color-scheme: light;
+  --ink: #171717;
+  --bg-primary: #f8f3eb;
+  --bg-secondary: #efe8dc;
+  --bg-tertiary: #ffffff;
+  --surface-glass: rgba(255, 250, 243, 0.86);
+  --surface-soft: rgba(255, 255, 255, 0.58);
+  --surface-input: rgba(255, 255, 255, 0.7);
+  --text-primary: #171717;
+  --text-secondary: #4f4942;
+  --text-muted: #6b655e;
+  --border-color: rgba(23, 23, 23, 0.12);
 
-  --primary-color: #cb4a2f;
-  --primary-hover: #a23b24;
-  --danger-color: #bb3726;
-  --danger-hover: #902818;
-  --success-color: #1f8f58;
-  --warning-color: #b87527;
-  --info-color: #167a83;
+  --primary-color: #c75b39;
+  --primary-hover: #9f4327;
+  --accent-green: #235347;
+  --danger-color: #c0392b;
+  --danger-hover: #9f2f1f;
+  --success-color: #238f52;
+  --warning-color: #b7791f;
+  --info-color: #0f5d79;
 
-  --shadow-sm: 0 3px 10px rgba(43, 26, 10, 0.08);
-  --shadow-md: 0 10px 24px rgba(43, 26, 10, 0.12);
-  --shadow-lg: 0 18px 40px rgba(43, 26, 10, 0.16);
-  --shadow-xl: 0 24px 56px rgba(43, 26, 10, 0.24);
+  --shadow-sm: 0 10px 28px rgba(31, 24, 18, 0.1);
+  --shadow-md: 0 14px 34px rgba(31, 24, 18, 0.12);
+  --shadow-lg: 0 18px 40px rgba(31, 24, 18, 0.14);
+  --shadow-xl: 0 22px 48px rgba(31, 24, 18, 0.16);
 
   --radius-sm: 8px;
-  --radius-md: 12px;
-  --radius-lg: 16px;
-  --radius-xl: 22px;
+  --radius-md: 8px;
+  --radius-lg: 8px;
+  --radius-xl: 8px;
 
-  --font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  --font-display: "Sora", "Trebuchet MS", sans-serif;
+  --font-family: "Plus Jakarta Sans", "Segoe UI", sans-serif;
+  --font-display: "Space Grotesk", "Trebuchet MS", sans-serif;
   --font-mono: "JetBrains Mono", "Consolas", monospace;
 }
 
 [data-theme="dark"] {
-  --bg-primary: #14110d;
-  --bg-secondary: #1d1813;
-  --bg-tertiary: #2a2219;
-  --text-primary: #f5e8d8;
-  --text-secondary: #d3bea8;
-  --text-muted: #af967f;
-  --border-color: #503f2e;
+  color-scheme: dark;
+  --ink: #f5f0e9;
+  --bg-primary: #111513;
+  --bg-secondary: #18231f;
+  --bg-tertiary: #202923;
+  --surface-glass: rgba(26, 34, 30, 0.9);
+  --surface-soft: rgba(255, 255, 255, 0.055);
+  --surface-input: rgba(255, 255, 255, 0.08);
+  --text-primary: #f5f0e9;
+  --text-secondary: #d9cec1;
+  --text-muted: #a99f93;
+  --border-color: rgba(255, 248, 239, 0.14);
 
-  --primary-color: #ff7b43;
-  --primary-hover: #ff9a6f;
-  --danger-color: #ff6258;
-  --danger-hover: #ff847e;
-  --success-color: #46c67e;
-  --warning-color: #f1aa49;
-  --info-color: #38bac6;
+  --primary-color: #ff8754;
+  --primary-hover: #ff9d74;
+  --accent-green: #70d0ac;
+  --danger-color: #ff6f61;
+  --danger-hover: #ff9187;
+  --success-color: #57d789;
+  --warning-color: #f0b457;
+  --info-color: #65c7c8;
 
-  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.38);
-  --shadow-md: 0 10px 24px rgba(0, 0, 0, 0.48);
-  --shadow-lg: 0 20px 42px rgba(0, 0, 0, 0.56);
-  --shadow-xl: 0 32px 64px rgba(0, 0, 0, 0.65);
+  --shadow-sm: 0 10px 28px rgba(0, 0, 0, 0.22);
+  --shadow-md: 0 14px 34px rgba(0, 0, 0, 0.26);
+  --shadow-lg: 0 18px 40px rgba(0, 0, 0, 0.3);
+  --shadow-xl: 0 22px 48px rgba(0, 0, 0, 0.34);
 }
 
 * {
@@ -71,9 +83,10 @@ body {
   color: var(--text-primary);
   line-height: 1.5;
   background:
-    radial-gradient(circle at 18% 8%, color-mix(in srgb, var(--primary-color) 12%, transparent), transparent 42%),
-    radial-gradient(circle at 88% 90%, color-mix(in srgb, var(--info-color) 13%, transparent), transparent 46%),
-    linear-gradient(170deg, var(--bg-primary), color-mix(in srgb, var(--bg-primary) 72%, #000));
+    linear-gradient(rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px),
+    linear-gradient(160deg, var(--bg-primary), var(--bg-secondary));
+  background-size: 22px 22px, 22px 22px, auto;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.25s ease, color 0.25s ease;
