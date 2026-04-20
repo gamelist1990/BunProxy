@@ -95,7 +95,10 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
         .unwrap_or("");
     let origin_with_base = format!("{origin}{base_path}");
 
-    let mut lines = head.split("\r\n").map(ToString::to_string).collect::<Vec<_>>();
+    let mut lines = head
+        .split("\r\n")
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
     if lines.is_empty() {
         return buf.to_vec();
     }
@@ -170,7 +173,11 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
             if changed {
                 if let Some(encoded) = encode_body(rewritten_text.as_bytes(), &content_encoding) {
                     rewritten_body = encoded;
-                    set_header_value(&mut lines, "Content-Length", &rewritten_body.len().to_string());
+                    set_header_value(
+                        &mut lines,
+                        "Content-Length",
+                        &rewritten_body.len().to_string(),
+                    );
                 }
             }
         }
@@ -187,7 +194,10 @@ pub fn rewrite_http_response(buf: &[u8], target: &ProxyTarget) -> Vec<u8> {
 }
 
 #[cfg(test)]
-pub fn expected_response_total_len_if_rewrite_needed(buf: &[u8], target: &ProxyTarget) -> Option<usize> {
+pub fn expected_response_total_len_if_rewrite_needed(
+    buf: &[u8],
+    target: &ProxyTarget,
+) -> Option<usize> {
     if target.url_protocol.is_none() {
         return None;
     }
@@ -236,7 +246,10 @@ pub fn expected_response_total_len_if_rewrite_needed_with_head_end(
     ) {
         return None;
     }
-    let content_length = header_value(&lines, "content-length")?.trim().parse::<usize>().ok()?;
+    let content_length = header_value(&lines, "content-length")?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
     Some(head_end + 4 + content_length)
 }
 
@@ -369,8 +382,12 @@ fn encode_body(body: &[u8], encoding: &str) -> Option<Vec<u8>> {
             encoder.finish().ok()
         }
         "br" => {
-            let mut writer =
-                brotli::CompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE, BROTLI_QUALITY, BROTLI_LGWIN);
+            let mut writer = brotli::CompressorWriter::new(
+                Vec::new(),
+                BROTLI_BUFFER_SIZE,
+                BROTLI_QUALITY,
+                BROTLI_LGWIN,
+            );
             writer.write_all(body).ok()?;
             writer.flush().ok()?;
             Some(writer.into_inner())
@@ -396,7 +413,8 @@ mod tests {
 
     #[test]
     fn rewrites_absolute_links_in_html_body() {
-        let html = r#"<a href="https://gamelist1990.github.io/PEXServerWebSite/docs/start">Docs</a>"#;
+        let html =
+            r#"<a href="https://gamelist1990.github.io/PEXServerWebSite/docs/start">Docs</a>"#;
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
             html.len(),
@@ -440,7 +458,8 @@ mod tests {
             html.len(),
             html
         );
-        let expected = expected_response_total_len_if_rewrite_needed(response.as_bytes(), &target());
+        let expected =
+            expected_response_total_len_if_rewrite_needed(response.as_bytes(), &target());
         assert_eq!(expected, Some(response.len()));
     }
 }

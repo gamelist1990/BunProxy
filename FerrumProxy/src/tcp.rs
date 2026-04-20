@@ -270,11 +270,12 @@ async fn copy_bidirectional(
             pending.extend_from_slice(&buf[..len]);
             if let Some(header_end) = pending.windows(4).position(|window| window == b"\r\n\r\n") {
                 if expected_total_len.is_none() {
-                    expected_total_len = expected_response_total_len_if_rewrite_needed_with_head_end(
-                        &pending,
-                        header_end,
-                        &response_target_config,
-                    );
+                    expected_total_len =
+                        expected_response_total_len_if_rewrite_needed_with_head_end(
+                            &pending,
+                            header_end,
+                            &response_target_config,
+                        );
                 }
                 if let Some(expected_total_len) = expected_total_len {
                     if pending.len() < expected_total_len {
