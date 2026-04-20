@@ -133,7 +133,7 @@ async fn handle_datagram(
         }
     }
 
-    try_send_udp(&rule, &mut session, original_client, &payload).await?;
+    try_send_udp(&rule, &runtime, &mut session, original_client, &payload).await?;
     if !session.notified {
         maybe_notify_connect(&runtime, &rule, &session, original_client).await;
         session.notified = true;
@@ -163,6 +163,7 @@ async fn create_session(
         })
         .await?,
     );
+    runtime.metrics.udp_session_opened();
     let recv_socket = Arc::clone(&socket);
     let send_server = Arc::clone(&server);
     let recv_sessions = Arc::clone(&sessions);
@@ -200,6 +201,7 @@ async fn create_session(
                         error!("UDP response send to {peer} failed: {err}");
                         break;
                     }
+                    recv_runtime.metrics.udp_target_to_client_bytes(response.len());
                     debug!("UDP {backend_addr} -> {peer} {}B", response.len());
                 }
                 Ok(Err(err)) => {
@@ -215,6 +217,7 @@ async fn create_session(
         }
 
         recv_sessions.lock().await.remove(&peer);
+        recv_runtime.metrics.udp_session_closed();
     });
 
     let session = UdpSession {
@@ -308,6 +311,7 @@ async fn maybe_notify_disconnect(
 
 async fn try_send_udp(
     rule: &ListenerRule,
+    runtime: &AppRuntime,
     session: &mut UdpSession,
     original_client: SocketAddr,
     payload: &[u8],
@@ -324,6 +328,7 @@ async fn try_send_udp(
 
         match send_to_target(
             rule,
+            runtime,
             session,
             original_client,
             payload,
@@ -350,6 +355,7 @@ async fn try_send_udp(
 
 async fn send_to_target(
     rule: &ListenerRule,
+    runtime: &AppRuntime,
     session: &mut UdpSession,
     original_client: SocketAddr,
     payload: &[u8],
@@ -377,6 +383,7 @@ async fn send_to_target(
     }
 
     session.socket.send_to(&out, target_addr).await?;
+    runtime.metrics.udp_client_to_target_bytes(out.len());
     session.active_target_index = target_index;
     debug!("UDP {original_client} -> {target_addr} {}B", out.len());
     Ok(())

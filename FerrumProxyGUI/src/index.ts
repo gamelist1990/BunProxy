@@ -60,7 +60,7 @@ function isRequestHttps(req: express.Request): boolean {
 function createDefaultConfig(): FerrumProxyConfig {
   return {
     endpoint: 6000,
-    useRestApi: false,
+    useRestApi: true,
     savePlayerIP: true,
     debug: false,
     listeners: [
@@ -831,6 +831,48 @@ app.get('/api/instances/:id/player-ips', async (req, res) => {
         throw error;
       }
     }
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/instances/:id/performance', async (req, res) => {
+  try {
+    const instanceId = req.params.id;
+    const instance = serviceManager.getById(instanceId);
+
+    if (!instance) {
+      return res.status(404).json({ error: 'Instance not found' });
+    }
+
+    const config = await configManager.read(instance.configPath);
+    if (!config.useRestApi) {
+      return res.status(409).json({
+        error: 'FerrumProxy REST API is disabled. Enable useRestApi to collect live performance metrics.',
+        restApiEnabled: false,
+      });
+    }
+
+    const endpoint = config.endpoint || 6000;
+    const response = await fetch(`http://127.0.0.1:${endpoint}/api/performance`, {
+      signal: AbortSignal.timeout(2000),
+    });
+
+    if (!response.ok) {
+      return res.status(502).json({
+        error: `FerrumProxy performance endpoint returned ${response.status}`,
+        restApiEnabled: true,
+      });
+    }
+
+    const performance = await response.json();
+    res.json({
+      ...performance,
+      instanceId,
+      pid: processManager.getPid(instanceId),
+      restApiEnabled: true,
+      sampledAt: new Date().toISOString(),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

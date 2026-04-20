@@ -69,6 +69,27 @@ export interface PlayerIPEntry {
   }>;
 }
 
+export interface ProtocolPerformanceMetrics {
+  activeSessions: number;
+  totalSessions: number;
+  bytesClientToTarget: number;
+  bytesTargetToClient: number;
+  totalBytes: number;
+}
+
+export interface PerformanceMetrics {
+  instanceId: string;
+  pid?: number;
+  uptimeSeconds: number;
+  totalActiveSessions: number;
+  totalSessions: number;
+  totalBytes: number;
+  tcp: ProtocolPerformanceMetrics;
+  udp: ProtocolPerformanceMetrics;
+  restApiEnabled: boolean;
+  sampledAt: string;
+}
+
 export interface Release {
   version: string;
   tag: string;
@@ -195,6 +216,15 @@ export async function uploadListenerTlsAssets(
 export async function fetchPlayerIPs(id: string): Promise<PlayerIPEntry[]> {
   const res = await fetch(`${API_BASE}/instances/${id}/player-ips`);
   if (!res.ok) throw new Error('Failed to fetch player IPs');
+  return res.json();
+}
+
+export async function fetchPerformance(id: string): Promise<PerformanceMetrics> {
+  const res = await fetch(`${API_BASE}/instances/${id}/performance`);
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ error: 'Failed to fetch performance metrics' }));
+    throw new Error(error.error || 'Failed to fetch performance metrics');
+  }
   return res.json();
 }
 

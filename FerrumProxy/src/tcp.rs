@@ -146,6 +146,7 @@ async fn handle_client(
                         false,
                     );
                     target_stream.write_all(&header).await?;
+                    runtime.metrics.tcp_client_to_target_bytes(header.len());
                 }
 
                 maybe_notify_connect(&runtime, &rule, &target, original_client).await;
@@ -156,6 +157,7 @@ async fn handle_client(
                     original_client,
                     target_addr,
                     target,
+                    Arc::clone(&runtime),
                     forwarded_proto,
                     initial_payload,
                 )
@@ -193,6 +195,8 @@ async fn copy_bidirectional(
     let (mut target_read, mut target_write) = tokio::io::split(target);
     let request_target_config = target_config.clone();
     let response_target_config = target_config;
+    let request_metrics = runtime.metrics.clone();
+    let response_metrics = runtime.metrics.clone();
 
     let client_to_target = tokio::spawn(async move {
         let mut total = 0u64;
@@ -231,7 +235,7 @@ async fn copy_bidirectional(
 
         if let Some(outgoing) = handle_chunk(&initial_client_payload) {
             target_write.write_all(&outgoing).await?;
-            runtime.metrics.tcp_client_to_target_bytes(outgoing.len());
+            request_metrics.tcp_client_to_target_bytes(outgoing.len());
             total += outgoing.len() as u64;
         }
 
@@ -243,7 +247,7 @@ async fn copy_bidirectional(
 
             if let Some(outgoing) = handle_chunk(&buf[..len]) {
                 target_write.write_all(&outgoing).await?;
-                runtime.metrics.tcp_client_to_target_bytes(outgoing.len());
+                request_metrics.tcp_client_to_target_bytes(outgoing.len());
                 total += outgoing.len() as u64;
             }
         }
@@ -256,9 +260,7 @@ async fn copy_bidirectional(
                 );
             }
             target_write.write_all(&pending_initial_http).await?;
-            runtime
-                .metrics
-                .tcp_client_to_target_bytes(pending_initial_http.len());
+            request_metrics.tcp_client_to_target_bytes(pending_initial_http.len());
             total += pending_initial_http.len() as u64;
         }
 
@@ -279,9 +281,7 @@ async fn copy_bidirectional(
 
             if response_head_handled {
                 client_write.write_all(&buf[..len]).await?;
-                response_target_config
-                    .metrics_tracker(&runtime)
-                    .tcp_target_to_client_bytes(len);
+                response_metrics.tcp_target_to_client_bytes(len);
                 total += len as u64;
                 continue;
             }
@@ -292,7 +292,7 @@ async fn copy_bidirectional(
                 response_head_handled = true;
                 let rewritten = rewrite_http_response(&pending, &response_target_config);
                 client_write.write_all(&rewritten).await?;
-                runtime.metrics.tcp_target_to_client_bytes(rewritten.len());
+                response_metrics.tcp_target_to_client_bytes(rewritten.len());
                 total += rewritten.len() as u64;
                 pending.clear();
             }
@@ -300,7 +300,7 @@ async fn copy_bidirectional(
 
         if !pending.is_empty() {
             client_write.write_all(&pending).await?;
-            runtime.metrics.tcp_target_to_client_bytes(pending.len());
+            response_metrics.tcp_target_to_client_bytes(pending.len());
             total += pending.len() as u64;
         }
 

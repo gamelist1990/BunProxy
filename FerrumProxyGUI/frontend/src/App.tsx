@@ -8,6 +8,7 @@ import type {
   FerrumProxyPlatform,
   AuthStatus,
   PlayerIPEntry,
+  PerformanceMetrics,
 } from "./api";
 import {
   fetchInstances,
@@ -19,7 +20,6 @@ import {
   fetchLogs,
   fetchConfig,
   updateConfig,
-  checkUpdates,
   fetchLatestRelease,
   fetchAllReleases,
   checkAuthStatus,
@@ -27,6 +27,7 @@ import {
   logout,
   setupAuth,
   fetchPlayerIPs,
+  fetchPerformance,
   updateInstance,
   updateInstanceMetadata,
   fetchSystemInfo,
@@ -39,7 +40,7 @@ import { UpdateProgress } from "./components/UpdateProgress";
 import { InstanceSettingsModal } from "./components/InstanceSettingsModal";
 import { formatLogMessage } from "./utils/ansi";
 import { DEFAULT_FERRUMPROXY_VERSION } from "./utils/version";
-import type { WebSocketEventMap, UpdateCheckResult } from "./api";
+import type { WebSocketEventMap } from "./api";
 import { LOG_DISPLAY_LIMIT } from "./utils/constants";
 
 function App() {
@@ -48,6 +49,8 @@ function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [config, setConfig] = useState<FerrumProxyConfig | null>(null);
   const [playerIPs, setPlayerIPs] = useState<PlayerIPEntry[]>([]);
+  const [performance, setPerformance] = useState<PerformanceMetrics | null>(null);
+  const [performanceError, setPerformanceError] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
   const [initializingInstances, setInitializingInstances] = useState<
     Set<string>
@@ -286,7 +289,23 @@ function App() {
       loadLogs(selectedInstance);
       loadConfig(selectedInstance);
       loadPlayerIPs(selectedInstance);
+      loadPerformance(selectedInstance);
+    } else {
+      setPerformance(null);
+      setPerformanceError(null);
     }
+  }, [selectedInstance]);
+
+  useEffect(() => {
+    if (!selectedInstance) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadPerformance(selectedInstance);
+    }, 2500);
+
+    return () => window.clearInterval(interval);
   }, [selectedInstance]);
 
   useEffect(() => {
@@ -343,6 +362,18 @@ function App() {
     } catch (error) {
       console.error("Failed to load player IPs", error);
       setPlayerIPs([]);
+    }
+  }
+
+  async function loadPerformance(instanceId: string) {
+    try {
+      const data = await fetchPerformance(instanceId);
+      setPerformance(data);
+      setPerformanceError(null);
+    } catch (error) {
+      const err = error as Error;
+      setPerformance(null);
+      setPerformanceError(err.message);
     }
   }
 
@@ -437,33 +468,6 @@ function App() {
     }
   }
 
-  async function handleCheckUpdates() {
-    try {
-      await loadReleases();
-
-      const data: UpdateCheckResult = await checkUpdates();
-      const hasUpdates = data.updates.some((u) => u.hasUpdate);
-      if (hasUpdates) {
-        alert(`${t("updatesAvailable")} ${data.latestRelease.version}`);
-      } else {
-        alert(t("allUpToDate"));
-      }
-    } catch (error) {
-      const err = error as Error;
-      if (
-        err.message &&
-        (err.message.includes("rate limit") ||
-          err.message.includes("レート制限"))
-      ) {
-        alert(
-          `⚠️ GitHub APIのレート制限に達しました。\n\n更新確認ができません。しばらく待ってから再度試してください。`
-        );
-      } else {
-        alert(`${t("errorCheckUpdates")} ${err.message}`);
-      }
-    }
-  }
-
   async function handleUpdateInstance(
     instanceId: string,
     version: string = "latest",
@@ -518,6 +522,61 @@ function App() {
       initializing: initializingInstances.size,
     };
   }, [instances, initializingInstances]);
+
+  const formatBytes = (bytes: number) => {
+    if (!Number.isFinite(bytes) || bytes <= 0) {
+      return "0 B";
+    }
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let value = bytes;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
+  };
+
+  const formatDuration = (seconds: number) => {
+    const safeSeconds = Math.max(0, Math.floor(seconds || 0));
+    const hours = Math.floor(safeSeconds / 3600);
+    const minutes = Math.floor((safeSeconds % 3600) / 60);
+    const secs = safeSeconds % 60;
+    if (hours > 0) {
+      return `${hours}h ${minutes}m ${secs}s`;
+    }
+    if (minutes > 0) {
+      return `${minutes}m ${secs}s`;
+    }
+    return `${secs}s`;
+  };
+
+  const exportPerformanceJson = () => {
+    if (!performance || !selectedInstanceData) {
+      return;
+    }
+
+    const payload = {
+      instance: {
+        id: selectedInstanceData.id,
+        name: selectedInstanceData.name,
+        version: selectedInstanceData.version,
+        platform: selectedInstanceData.platform,
+      },
+      performance,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `ferrum-performance-${selectedInstanceData.name}-${new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
 
   const getRuntimeState = (
     instance: FerrumProxyInstance
@@ -616,13 +675,6 @@ function App() {
               }
             >
               {theme === "light" ? "Night" : "Light"}
-            </button>
-            <button
-              type="button"
-              className="btn tertiary"
-              onClick={handleCheckUpdates}
-            >
-              {t("checkUpdates")}
             </button>
             {authStatus?.hasAuth && (
               <button
@@ -858,6 +910,83 @@ function App() {
                     targetVersion={updateProgress.targetVersion}
                   />
                 )}
+
+                <section className="surface-card performance-card">
+                  <div className="section-head">
+                    <h3>{t("performanceMonitor") || "Performance Monitor"}</h3>
+                    <button
+                      type="button"
+                      className="btn tertiary small"
+                      onClick={exportPerformanceJson}
+                      disabled={!performance}
+                    >
+                      {t("exportJson") || "Export JSON"}
+                    </button>
+                  </div>
+
+                  {performance ? (
+                    <>
+                      <div className="performance-grid">
+                        <article className="metric-card">
+                          <span>{t("uptime") || "Uptime"}</span>
+                          <strong>{formatDuration(performance.uptimeSeconds)}</strong>
+                        </article>
+                        <article className="metric-card">
+                          <span>{t("activeSessions") || "Active Sessions"}</span>
+                          <strong>{performance.totalActiveSessions}</strong>
+                        </article>
+                        <article className="metric-card">
+                          <span>{t("totalSessions") || "Total Sessions"}</span>
+                          <strong>{performance.totalSessions}</strong>
+                        </article>
+                        <article className="metric-card">
+                          <span>{t("totalTraffic") || "Total Traffic"}</span>
+                          <strong>{formatBytes(performance.totalBytes)}</strong>
+                        </article>
+                      </div>
+
+                      <div className="protocol-grid">
+                        {(["tcp", "udp"] as const).map((protocol) => {
+                          const metrics = performance[protocol];
+                          return (
+                            <article key={protocol} className="protocol-card">
+                              <h4>{protocol.toUpperCase()}</h4>
+                              <dl>
+                                <div>
+                                  <dt>{t("activeSessions") || "Active Sessions"}</dt>
+                                  <dd>{metrics.activeSessions}</dd>
+                                </div>
+                                <div>
+                                  <dt>{t("totalSessions") || "Total Sessions"}</dt>
+                                  <dd>{metrics.totalSessions}</dd>
+                                </div>
+                                <div>
+                                  <dt>{t("clientToTarget") || "Client -> Target"}</dt>
+                                  <dd>{formatBytes(metrics.bytesClientToTarget)}</dd>
+                                </div>
+                                <div>
+                                  <dt>{t("targetToClient") || "Target -> Client"}</dt>
+                                  <dd>{formatBytes(metrics.bytesTargetToClient)}</dd>
+                                </div>
+                              </dl>
+                            </article>
+                          );
+                        })}
+                      </div>
+
+                      <p className="performance-note">
+                        {t("performanceSampledAt") || "Sampled at"}{" "}
+                        {new Date(performance.sampledAt).toLocaleTimeString()}
+                      </p>
+                    </>
+                  ) : (
+                    <p className="performance-note">
+                      {performanceError ||
+                        t("performanceUnavailable") ||
+                        "Performance metrics are unavailable. Enable useRestApi and start the instance."}
+                    </p>
+                  )}
+                </section>
 
                 <InstanceSettingsModal
                   isOpen={settingsModalOpen}
