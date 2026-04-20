@@ -1,50 +1,81 @@
-/* Config Editor Specific Styles */
-
 .config-editor {
   display: flex;
   flex-direction: column;
-  gap: 2rem;
-  height: 100%;
+  gap: 1rem;
+  padding: 0.9rem;
 }
 
 .json-editor textarea {
   width: 100%;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border: 1.5px solid var(--border-color);
-  border-radius: var(--radius-md);
-  padding: 1.25rem;
-  font-family: var(--font-mono);
-  font-size: 0.9rem;
-  line-height: 1.6;
+  min-height: 380px;
   resize: vertical;
-  min-height: 400px;
-  transition: all 0.2s ease;
-}
-
-.json-editor textarea:hover {
-  border-color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-color);
+  background: color-mix(in srgb, var(--bg-tertiary) 86%, transparent);
+  color: var(--text-primary);
+  padding: 0.95rem;
+  line-height: 1.5;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .json-editor textarea:focus {
   outline: none;
-  border-color: var(--primary-color);
-  background: var(--bg-secondary);
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.08);
+  border-color: color-mix(in srgb, var(--primary-color) 70%, var(--border-color));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 20%, transparent);
 }
 
-/* Utility classes used in components if not using Tailwind */
-.w-full { width: 100%; }
-.flex { display: flex; }
-.flex-col { flex-direction: column; }
-.gap-4 { gap: 1rem; }
-.pt-2 { padding-top: 0.5rem; }
-.mt-4 { margin-top: 1rem; }
-.mb-4 { margin-bottom: 1rem; }
-.mt-6 { margin-top: 1.5rem; }
-.justify-between { justify-content: space-between; }
-.items-center { align-items: center; }
-.flex-1 { flex: 1; }
-.text-lg { font-size: 1.125rem; }
-.font-bold { font-weight: 700; }
-.text-primary { color: var(--primary-color); }
+.config-actions {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.listener-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.w-full {
+  width: 100%;
+}
+
+.p-4 {
+  padding: 1rem;
+}
+
+.bg-tertiary {
+  background: color-mix(in srgb, var(--bg-tertiary) 84%, transparent);
+}
+
+.text-primary {
+  color: var(--text-primary);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+.text-sm {
+  font-size: 0.85rem;
+}
+
+.border {
+  border-width: 1px;
+  border-style: solid;
+}
+
+.border-border {
+  border-color: var(--border-color);
+}
+
+.rounded-md {
+  border-radius: var(--radius-md);
+}
+
+.focus\:outline-none:focus {
+  outline: none;
+}
+
+.focus\:border-primary:focus {
+  border-color: color-mix(in srgb, var(--primary-color) 70%, var(--border-color));
+}

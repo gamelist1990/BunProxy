@@ -5,8 +5,6 @@ interface PlayerIPListProps {
   playerIPs: PlayerIPEntry[];
 }
 
-const now = Date.now();
-
 export function PlayerIPList({ playerIPs }: PlayerIPListProps) {
   // プレイヤー名でソート (a-z順)
   const sortedPlayers = [...playerIPs].sort((a, b) =>
@@ -19,7 +17,7 @@ export function PlayerIPList({ playerIPs }: PlayerIPListProps) {
   };
 
   const formatTimeSince = (timestamp: number) => {
-    const diff = now - timestamp;
+    const diff = Date.now() - timestamp;
 
     const minutes = Math.floor(diff / 60000);
     const hours = Math.floor(diff / 3600000);

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import "./App.css";
 import { useWebSocket } from "./useWebSocket";
 import type {
@@ -64,6 +64,7 @@ function App() {
   const [language, setLang] = useState<Language>(getLanguage());
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
 
   const [theme, setTheme] = useState<"light" | "dark">(() => {
     const saved = localStorage.getItem("theme");
@@ -81,7 +82,6 @@ function App() {
 
   const { isConnected, on } = useWebSocket();
 
-
   const handleLanguageChange = (lang: Language) => {
     setLanguage(lang);
     setLang(lang);
@@ -96,9 +96,20 @@ function App() {
     setTheme((prev) => (prev === "light" ? "dark" : "light"));
   };
 
-  useEffect(() => {
-    checkAuth();
+  const checkAuth = useCallback(async () => {
+    try {
+      const status = await checkAuthStatus();
+      setAuthStatus(status);
+      setAuthChecked(true);
+    } catch (error) {
+      console.error("Auth check failed:", error);
+      setAuthChecked(true);
+    }
   }, []);
+
+  useEffect(() => {
+    void checkAuth();
+  }, [checkAuth]);
 
   useEffect(() => {
     if (!authChecked) return;
@@ -112,21 +123,6 @@ function App() {
       })
       .catch(() => {});
   }, [authChecked, authStatus]);
-
-  const checkAuth = async () => {
-    try {
-      const status = await checkAuthStatus();
-      setAuthStatus(status);
-      setAuthChecked(true);
-
-      if (status.isAuthenticated) {
-        loadInstances();
-      }
-    } catch (error) {
-      console.error("Auth check failed:", error);
-      setAuthChecked(true);
-    }
-  };
 
   async function handleLogin(username: string, password: string) {
     if (!authStatus) return;
@@ -293,6 +289,10 @@ function App() {
     }
   }, [selectedInstance]);
 
+  useEffect(() => {
+    setSettingsModalOpen(false);
+  }, [selectedInstance]);
+
   async function loadInstances() {
     try {
       const data = await fetchInstances();
@@ -349,6 +349,8 @@ function App() {
   async function handleCreateInstance() {
     try {
       setIsCreating(true);
+      const preferredPlatform = newInstanceForm.platform;
+      const preferredVersion = newInstanceForm.version;
 
       if (
         availableVersions.length === 1 &&
@@ -364,8 +366,8 @@ function App() {
       await createInstance(newInstanceForm);
       setNewInstanceForm({
         name: "",
-        platform: "linux",
-        version: DEFAULT_FERRUMPROXY_VERSION,
+        platform: preferredPlatform,
+        version: preferredVersion,
       });
       await loadInstances();
     } catch (error) {
@@ -497,14 +499,49 @@ function App() {
     }
   }
 
-  const selectedInstanceData = Array.isArray(instances)
-    ? instances.find((i) => i.id === selectedInstance)
-    : null;
+  const selectedInstanceData = useMemo(
+    () => instances.find((instance) => instance.id === selectedInstance) || null,
+    [instances, selectedInstance]
+  );
+
   const updateProgress = selectedInstance
     ? updatingInstances.get(selectedInstance)
     : undefined;
 
-  const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const instanceMetrics = useMemo(() => {
+    const running = instances.filter(
+      (instance) => typeof instance.pid === "number"
+    ).length;
+    return {
+      total: instances.length,
+      running,
+      initializing: initializingInstances.size,
+    };
+  }, [instances, initializingInstances]);
+
+  const getRuntimeState = (
+    instance: FerrumProxyInstance
+  ): "initializing" | "running" | "stopped" => {
+    if (initializingInstances.has(instance.id)) {
+      return "initializing";
+    }
+    if (instance.pid) {
+      return "running";
+    }
+    return "stopped";
+  };
+
+  const runtimeLabel = (
+    state: "initializing" | "running" | "stopped"
+  ): string => {
+    if (state === "initializing") {
+      return t("initializing");
+    }
+    if (state === "running") {
+      return t("running");
+    }
+    return t("stopped");
+  };
 
   if (!authChecked) {
     return (
@@ -536,263 +573,360 @@ function App() {
 
   return (
     <div className="app">
-      <header>
-        <h1>{t("appTitle")}</h1>
-        <div className="connection-status">
-          <span className={isConnected ? "connected" : "disconnected"}>
-            {isConnected ? t("connected") : t("disconnected")}
-          </span>
-          <select
-            value={language}
-            onChange={(e) => handleLanguageChange(e.target.value as Language)}
-          >
-            <option value="ja_JP">日本語</option>
-            <option value="en_US">English</option>
-          </select>
-          <button
-            onClick={toggleTheme}
-            title={
-              theme === "light" ? "Switch to Dark Mode" : "Switch to Light Mode"
-            }
-          >
-            {theme === "light" ? "Night" : "Light"}
-          </button>
-          <button onClick={handleCheckUpdates}>{t("checkUpdates")}</button>
-          {latestVersion && (
-            <span>
-              {t("latest")}: v{latestVersion}
-            </span>
-          )}
-          {authStatus?.hasAuth && (
-            <button onClick={handleLogout} className="logout-btn">
-              {t("logout")}
-            </button>
-          )}
-        </div>
-      </header>
+      <div className="app-shell">
+        <div className="ambient ambient-left" aria-hidden="true" />
+        <div className="ambient ambient-right" aria-hidden="true" />
 
-      <div className="main-container">
-        <aside className="sidebar">
-          <h2>{t("instances")}</h2>
-          <div className="instance-list">
-            {Array.isArray(instances) &&
-              instances.map((instance) => (
-                <div
-                  key={instance.id}
-                  className={`instance-item ${
-                    selectedInstance === instance.id ? "selected" : ""
-                  } ${
-                    initializingInstances.has(instance.id) ? "initializing" : ""
-                  }`}
-                  onClick={() => setSelectedInstance(instance.id)}
-                >
-                  <div className="instance-info">
-                    <strong>{instance.name}</strong>
-                    <span className="instance-status">
-                      {initializingInstances.has(instance.id)
-                        ? t("initializing")
-                        : instance.pid
-                        ? t("running")
-                        : t("stopped")}
-                    </span>
-                    {instance.autoRestart && (
-                      <span
-                        className="auto-restart-badge"
-                        title={t("autoRestart") || "自動起動"}
-                        style={{
-                          marginLeft: "0.5rem",
-                          fontSize: "0.8rem",
-                          color: "var(--primary-color)",
-                        }}
-                      ></span>
-                    )}
-                    <small>
-                      {instance.platform} v{instance.version}
-                    </small>
-                  </div>
-                </div>
-              ))}
+        <header className="topbar">
+          <div className="brand">
+            <p className="brand-kicker">FerrumProxy Control Console</p>
+            <h1>{t("appTitle")}</h1>
+            <div className="status-strip" aria-live="polite">
+              <span
+                className={`connection-pill ${
+                  isConnected ? "online" : "offline"
+                }`}
+              >
+                {isConnected ? t("connected") : t("disconnected")}
+              </span>
+              {latestVersion && (
+                <span className="latest-pill">
+                  {t("latest")}: v{latestVersion}
+                </span>
+              )}
+            </div>
           </div>
 
-          <div className="create-instance">
-            <h3>{t("createNewInstance")}</h3>
-            <input
-              type="text"
-              placeholder={t("placeholderInstanceName")}
-              value={newInstanceForm.name}
-              onChange={(e) =>
-                setNewInstanceForm({ ...newInstanceForm, name: e.target.value })
-              }
-            />
+          <div className="toolbar">
             <select
-              value={newInstanceForm.platform}
-              onChange={(e) =>
-                setNewInstanceForm({
-                  ...newInstanceForm,
-                  platform: e.target.value as FerrumProxyPlatform,
-                })
-              }
+              className="compact-select"
+              aria-label="Language"
+              value={language}
+              onChange={(e) => handleLanguageChange(e.target.value as Language)}
             >
-              <option value="linux">{t("platformLinux")}</option>
-              <option value="linux-arm64">{t("platformLinux")} (ARM64)</option>
-              <option value="macos-arm64">{t("platformMacOS")}</option>
-              <option value="windows">{t("platformWindows")}</option>
-            </select>
-            <select
-              value={newInstanceForm.version}
-              onChange={(e) =>
-                setNewInstanceForm({
-                  ...newInstanceForm,
-                  version: e.target.value,
-                })
-              }
-            >
-              <option value="latest">
-                {t("latestVersion") || "Latest"} ({latestVersion})
-              </option>
-              {availableVersions.map((version) => (
-                <option key={version} value={version}>
-                  {version}
-                </option>
-              ))}
+              <option value="ja_JP">日本語</option>
+              <option value="en_US">English</option>
             </select>
             <button
-              onClick={handleCreateInstance}
-              disabled={isCreating || !newInstanceForm.name}
+              type="button"
+              className="btn tertiary"
+              onClick={toggleTheme}
+              title={
+                theme === "light" ? "Switch to Dark Mode" : "Switch to Light Mode"
+              }
             >
-              {isCreating ? t("creating") : t("createInstance")}
+              {theme === "light" ? "Night" : "Light"}
             </button>
+            <button
+              type="button"
+              className="btn tertiary"
+              onClick={handleCheckUpdates}
+            >
+              {t("checkUpdates")}
+            </button>
+            {authStatus?.hasAuth && (
+              <button
+                type="button"
+                className="btn danger"
+                onClick={handleLogout}
+              >
+                {t("logout")}
+              </button>
+            )}
           </div>
-        </aside>
+        </header>
 
-        <main className="content">
-          {selectedInstanceData ? (
-            <>
-              <div className="instance-header">
-                <h2>{selectedInstanceData.name}</h2>
-                <div className="instance-actions">
-                  {selectedInstanceData.pid ? (
-                    <>
-                      <button
-                        onClick={() =>
-                          handleStopInstance(selectedInstanceData.id)
-                        }
-                      >
-                        {t("stop")}
-                      </button>
-                      <button
-                        onClick={() =>
-                          handleRestartInstance(selectedInstanceData.id)
-                        }
-                      >
-                        {t("restart")}
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      onClick={() =>
-                        handleStartInstance(selectedInstanceData.id)
-                      }
-                    >
-                      {t("start")}
-                    </button>
-                  )}
-
-                  <button
-                    onClick={() => setSettingsModalOpen(true)}
-                    className="settings-btn"
-                  >
-                    {t("settings") || "設定"}
-                  </button>
-
-                  <button
-                    onClick={() =>
-                      handleDeleteInstance(selectedInstanceData.id)
-                    }
-                    className="danger"
-                  >
-                    {t("delete")}
-                  </button>
-                </div>
+        <div className="dashboard">
+          <aside className="instance-panel">
+            <section className="panel-block metrics-block">
+              <div className="panel-title-row">
+                <h2>{t("instances")}</h2>
               </div>
 
-              {updateProgress && (
-                <UpdateProgress
-                  isUpdating={true}
-                  progress={updateProgress.progress}
-                  currentVersion={selectedInstanceData.version}
-                  targetVersion={updateProgress.targetVersion}
+              <div className="metrics-grid">
+                <article className="metric-card">
+                  <span>Total</span>
+                  <strong>{instanceMetrics.total}</strong>
+                </article>
+                <article className="metric-card">
+                  <span>{t("running")}</span>
+                  <strong>{instanceMetrics.running}</strong>
+                </article>
+                <article className="metric-card">
+                  <span>{t("initializing")}</span>
+                  <strong>{instanceMetrics.initializing}</strong>
+                </article>
+              </div>
+            </section>
+
+            <section className="panel-block list-block">
+              <div className="instance-list" role="list">
+                {instances.length === 0 && (
+                  <div className="instance-empty">No instance yet.</div>
+                )}
+
+                {instances.map((instance, index) => {
+                  const state = getRuntimeState(instance);
+                  const selected = selectedInstance === instance.id;
+
+                  return (
+                    <button
+                      type="button"
+                      key={instance.id}
+                      className={`instance-item ${selected ? "selected" : ""} ${state}`}
+                      role="listitem"
+                      onClick={() => setSelectedInstance(instance.id)}
+                      style={{ animationDelay: `${Math.min(index * 70, 560)}ms` }}
+                    >
+                      <div className="instance-item-header">
+                        <strong>{instance.name}</strong>
+                        <span className={`instance-dot ${state}`} />
+                      </div>
+
+                      <span className={`instance-status-tag ${state}`}>
+                        {runtimeLabel(state)}
+                      </span>
+
+                      <small>
+                        {instance.platform} ・ v{instance.version}
+                      </small>
+
+                      <div className="badge-row">
+                        {instance.autoStart && (
+                          <span className="mini-badge">{t("autoStart")}</span>
+                        )}
+                        {instance.autoRestart && (
+                          <span className="mini-badge">{t("autoRestart")}</span>
+                        )}
+                        {instance.pid && (
+                          <span className="mini-badge">PID {instance.pid}</span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="panel-block create-block">
+              <h3>{t("createNewInstance")}</h3>
+              <form
+                className="create-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  void handleCreateInstance();
+                }}
+              >
+                <label htmlFor="create-instance-name">{t("instanceName")}</label>
+                <input
+                  id="create-instance-name"
+                  type="text"
+                  placeholder={t("placeholderInstanceName")}
+                  value={newInstanceForm.name}
+                  onChange={(e) =>
+                    setNewInstanceForm({
+                      ...newInstanceForm,
+                      name: e.target.value,
+                    })
+                  }
                 />
-              )}
 
-              <InstanceSettingsModal
-                isOpen={settingsModalOpen}
-                onClose={() => setSettingsModalOpen(false)}
-                instanceName={selectedInstanceData.name}
-                instanceVersion={selectedInstanceData.version}
-                autoStart={!!selectedInstanceData.autoStart}
-                autoRestart={!!selectedInstanceData.autoRestart}
-                onUpdateName={async (name) => {
-                  await updateInstanceMetadata(selectedInstanceData.id, {
-                    name,
-                  });
-                  setInstances((prev) =>
-                    Array.isArray(prev)
-                      ? prev.map((it) =>
-                          it.id === selectedInstanceData.id
-                            ? { ...it, name }
-                            : it
-                        )
-                      : prev
-                  );
-                }}
-                onToggleAutoStart={async (enabled) => {
-                  await updateInstanceMetadata(selectedInstanceData.id, {
-                    autoStart: enabled,
-                  });
-                  setInstances((prev) =>
-                    Array.isArray(prev)
-                      ? prev.map((it) =>
-                          it.id === selectedInstanceData.id
-                            ? { ...it, autoStart: enabled }
-                            : it
-                        )
-                      : prev
-                  );
-                }}
-                onToggleAutoRestart={async (enabled) => {
-                  await updateInstanceMetadata(selectedInstanceData.id, {
-                    autoRestart: enabled,
-                  });
-                  setInstances((prev) =>
-                    Array.isArray(prev)
-                      ? prev.map((it) =>
-                          it.id === selectedInstanceData.id
-                            ? { ...it, autoRestart: enabled }
-                            : it
-                        )
-                      : prev
-                  );
-                }}
-                onUpdateInstance={async (version, forceReinstall) => {
-                  await handleUpdateInstance(
-                    selectedInstanceData.id,
-                    version,
-                    !!forceReinstall
-                  );
-                }}
-                availableVersions={availableVersions}
-                latestVersion={latestVersion}
-                isUpdating={updatingInstances.has(selectedInstanceData.id)}
-              />
+                <label htmlFor="create-instance-platform">{t("platform")}</label>
+                <select
+                  id="create-instance-platform"
+                  value={newInstanceForm.platform}
+                  onChange={(e) =>
+                    setNewInstanceForm({
+                      ...newInstanceForm,
+                      platform: e.target.value as FerrumProxyPlatform,
+                    })
+                  }
+                >
+                  <option value="linux">{t("platformLinux")}</option>
+                  <option value="linux-arm64">{t("platformLinux")} (ARM64)</option>
+                  <option value="macos-arm64">{t("platformMacOS")}</option>
+                  <option value="windows">{t("platformWindows")}</option>
+                </select>
 
-              <div className="tabs">
-                <div className="tab-content">
-                  <section className="console">
-                    <h3>{t("consoleLogs")}</h3>
+                <label htmlFor="create-instance-version">{t("version")}</label>
+                <select
+                  id="create-instance-version"
+                  value={newInstanceForm.version}
+                  onChange={(e) =>
+                    setNewInstanceForm({
+                      ...newInstanceForm,
+                      version: e.target.value,
+                    })
+                  }
+                >
+                  <option value="latest">
+                    {t("latestVersion") || "Latest"} (v{latestVersion})
+                  </option>
+                  {availableVersions.map((version) => (
+                    <option key={version} value={version}>
+                      v{version}
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  type="submit"
+                  className="btn primary"
+                  disabled={isCreating || !newInstanceForm.name.trim()}
+                >
+                  {isCreating ? t("creating") : t("createInstance")}
+                </button>
+              </form>
+            </section>
+          </aside>
+
+          <main className="workspace">
+            {selectedInstanceData ? (
+              <>
+                <section className="instance-hero">
+                  <div className="hero-copy">
+                    <p className="hero-overline">{selectedInstanceData.platform}</p>
+                    <h2>{selectedInstanceData.name}</h2>
+                    <div className="hero-meta">
+                      <span
+                        className={`state-chip ${getRuntimeState(
+                          selectedInstanceData
+                        )}`}
+                      >
+                        {runtimeLabel(getRuntimeState(selectedInstanceData))}
+                      </span>
+                      <span>v{selectedInstanceData.version}</span>
+                      {selectedInstanceData.pid && (
+                        <span>PID {selectedInstanceData.pid}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="hero-actions">
+                    {selectedInstanceData.pid ? (
+                      <>
+                        <button
+                          type="button"
+                          className="btn tertiary"
+                          onClick={() => handleStopInstance(selectedInstanceData.id)}
+                        >
+                          {t("stop")}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn tertiary"
+                          onClick={() =>
+                            handleRestartInstance(selectedInstanceData.id)
+                          }
+                        >
+                          {t("restart")}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        className="btn primary"
+                        onClick={() => handleStartInstance(selectedInstanceData.id)}
+                      >
+                        {t("start")}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      className="btn tertiary"
+                      onClick={() => setSettingsModalOpen(true)}
+                    >
+                      {t("settings") || "設定"}
+                    </button>
+
+                    <button
+                      type="button"
+                      className="btn danger"
+                      onClick={() => handleDeleteInstance(selectedInstanceData.id)}
+                    >
+                      {t("delete")}
+                    </button>
+                  </div>
+                </section>
+
+                {updateProgress && (
+                  <UpdateProgress
+                    isUpdating={true}
+                    progress={updateProgress.progress}
+                    currentVersion={selectedInstanceData.version}
+                    targetVersion={updateProgress.targetVersion}
+                  />
+                )}
+
+                <InstanceSettingsModal
+                  isOpen={settingsModalOpen}
+                  onClose={() => setSettingsModalOpen(false)}
+                  instanceName={selectedInstanceData.name}
+                  instanceVersion={selectedInstanceData.version}
+                  autoStart={!!selectedInstanceData.autoStart}
+                  autoRestart={!!selectedInstanceData.autoRestart}
+                  onUpdateName={async (name) => {
+                    await updateInstanceMetadata(selectedInstanceData.id, {
+                      name,
+                    });
+                    setInstances((prev) =>
+                      prev.map((instance) =>
+                        instance.id === selectedInstanceData.id
+                          ? { ...instance, name }
+                          : instance
+                      )
+                    );
+                  }}
+                  onToggleAutoStart={async (enabled) => {
+                    await updateInstanceMetadata(selectedInstanceData.id, {
+                      autoStart: enabled,
+                    });
+                    setInstances((prev) =>
+                      prev.map((instance) =>
+                        instance.id === selectedInstanceData.id
+                          ? { ...instance, autoStart: enabled }
+                          : instance
+                      )
+                    );
+                  }}
+                  onToggleAutoRestart={async (enabled) => {
+                    await updateInstanceMetadata(selectedInstanceData.id, {
+                      autoRestart: enabled,
+                    });
+                    setInstances((prev) =>
+                      prev.map((instance) =>
+                        instance.id === selectedInstanceData.id
+                          ? { ...instance, autoRestart: enabled }
+                          : instance
+                      )
+                    );
+                  }}
+                  onUpdateInstance={async (version, forceReinstall) => {
+                    await handleUpdateInstance(
+                      selectedInstanceData.id,
+                      version,
+                      !!forceReinstall
+                    );
+                  }}
+                  availableVersions={availableVersions}
+                  latestVersion={latestVersion}
+                  isUpdating={updatingInstances.has(selectedInstanceData.id)}
+                />
+
+                <div className="workspace-grid">
+                  <section className="surface-card console-card">
+                    <div className="section-head">
+                      <h3>{t("consoleLogs")}</h3>
+                      <span>{logs.length} lines</span>
+                    </div>
+
                     <div className="log-container">
-                      {logs.map((log, i) => (
-                        <div key={i} className={`log-entry log-${log.type}`}>
+                      {logs.map((log, index) => (
+                        <div
+                          key={`${log.timestamp}-${index}`}
+                          className={`log-entry log-${log.type}`}
+                        >
                           <span className="log-time">
                             {new Date(log.timestamp).toLocaleTimeString()}
                           </span>
@@ -801,8 +935,8 @@ function App() {
                             {log.type === "stdout"
                               ? t("logStdout")
                               : log.type === "stderr"
-                              ? t("logStderr")
-                              : t("logSystem")}
+                                ? t("logStderr")
+                                : t("logSystem")}
                             ]
                           </span>
                           <span
@@ -816,8 +950,11 @@ function App() {
                     </div>
                   </section>
 
-                  <section className="config">
-                    <h3>{t("configuration")}</h3>
+                  <section className="surface-card config-card">
+                    <div className="section-head">
+                      <h3>{t("configuration")}</h3>
+                    </div>
+
                     {config && (
                       <ConfigEditor
                         instanceId={selectedInstanceData.id}
@@ -829,26 +966,39 @@ function App() {
                   </section>
 
                   {config?.savePlayerIP && (
-                    <section className="player-ips">
-                      <h3>プレイヤーIP記録</h3>
+                    <section className="surface-card player-ip-card">
+                      <div className="section-head">
+                        <h3>プレイヤーIP記録</h3>
+                        <button
+                          type="button"
+                          className="btn tertiary small"
+                          onClick={() => loadPlayerIPs(selectedInstanceData.id)}
+                        >
+                          更新
+                        </button>
+                      </div>
                       <PlayerIPList playerIPs={playerIPs} />
-                      <button
-                        onClick={() => loadPlayerIPs(selectedInstanceData.id)}
-                        style={{ marginTop: "1rem" }}
-                      >
-                        更新
-                      </button>
                     </section>
                   )}
                 </div>
-              </div>
-            </>
-          ) : (
-            <div className="no-selection">
-              <p>{t("noSelection")}</p>
-            </div>
-          )}
-        </main>
+              </>
+            ) : (
+              <section className="empty-state">
+                <h2>{t("appTitle")}</h2>
+                <p>{t("noSelection")}</p>
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => {
+                    document.getElementById("create-instance-name")?.focus();
+                  }}
+                >
+                  {t("createNewInstance")}
+                </button>
+              </section>
+            )}
+          </main>
+        </div>
       </div>
     </div>
   );

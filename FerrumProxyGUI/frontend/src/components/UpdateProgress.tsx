@@ -19,20 +19,20 @@ export function UpdateProgress({
     <div className="update-progress-overlay">
       <div className="update-progress-modal">
         <h3>アップデート中...</h3>
-        <div className="version-info">
-          <span className="version-label">現在のバージョン:</span>
-          <span className="version-current">{currentVersion}</span>
-          <span className="version-arrow">→</span>
-          <span className="version-target">{targetVersion}</span>
+
+        <div className="update-version-info">
+          <span className="update-version-label">現在のバージョン:</span>
+          <span className="update-version-current">{currentVersion}</span>
+          <span className="update-version-arrow">→</span>
+          <span className="update-version-target">{targetVersion}</span>
         </div>
-        <div className="progress-container">
-          <div className="progress-bar">
+
+        <div className="update-progress-container">
+          <div className="update-progress-bar">
             <div
-              className="progress-fill"
+              className="update-progress-fill"
               style={{
-                transform: `scaleX(${
-                  Math.max(0, Math.min(100, progress)) / 100
-                })`,
+                transform: `scaleX(${Math.max(0, Math.min(100, progress)) / 100})`,
               }}
               aria-valuenow={progress}
               aria-valuemin={0}
@@ -40,11 +40,10 @@ export function UpdateProgress({
               role="progressbar"
             />
           </div>
-          <div className="progress-text">{progress}%</div>
+          <div className="update-progress-text">{progress}%</div>
         </div>
-        <p className="update-message">
-          ダウンロード中です。しばらくお待ちください...
-        </p>
+
+        <p className="update-message">ダウンロード中です。しばらくお待ちください...</p>
       </div>
     </div>
   );
