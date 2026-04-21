@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(name = "ferrum-proxy")]
-#[command(about = "Rust implementation of BunProxy")]
+#[command(about = "Low-latency Rust proxy for Minecraft Bedrock and HTTP/HTTPS forwarding")]
 struct Args {
     #[arg(short, long, default_value = "config.yml")]
     config: PathBuf,

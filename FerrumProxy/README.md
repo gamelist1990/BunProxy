@@ -1,8 +1,15 @@
 # FerrumProxy
 
-Rust implementation of BunProxy.
+FerrumProxy is an independent Rust proxy server for Minecraft Bedrock and HTTP/HTTPS forwarding. It focuses on low-latency TCP/UDP forwarding, HAProxy PROXY protocol support, Bedrock pong rewriting, TLS listener support, Discord notifications, and a REST API that can be managed from the included web GUI.
 
-FerrumProxy lives beside the Bun/TypeScript implementation and aims to match the same public behavior while keeping the network hot path in Rust.
+`FerrumGUI` is bundled in this repository for browser-based management of one or more FerrumProxy instances.
+
+## Requirements
+
+- Rust stable
+- Cargo
+- Bun 1.0 or later, only when building or running `FerrumGUI`
+- CMake, optional wrapper for Cargo builds
 
 ## Build
 
@@ -59,7 +66,7 @@ On Windows:
 .\target\release\ferrum-proxy.exe
 ```
 
-## Implemented BunProxy Behavior
+## Features
 
 - YAML config with `endpoint`, `useRestApi`, `savePlayerIP`, `debug`, and `listeners`
 - TCP forwarding
@@ -76,9 +83,49 @@ On Windows:
 - Player connection buffering and player IP persistence in `playerIP.json`
 - Debug logging via `debug: true`
 
+## FerrumProxyGUI
+
+FerrumProxyGUI lives in `FerrumGUI`.
+
+```bash
+cd FerrumGUI
+bun install
+cd frontend && bun install && cd ..
+bun run build:frontend
+bun run generate:embed
+bun run dev
+```
+
+Open `http://localhost:3000`.
+
+Production mode:
+
+```bash
+cd FerrumGUI
+bun run build:frontend
+bun run generate:embed
+bun run build
+bun run start
+```
+
+FerrumProxyGUI downloads FerrumProxy binaries from `gamelist1990/FerrumProxy` by default. Override this when testing forks:
+
+```bash
+FERRUMPROXY_GITHUB_REPO=owner/repo FERRUMPROXY_RELEASE_TAG=FerrumProxy bun run start
+```
+
+## GitHub Actions
+
+This repository includes two independent workflows:
+
+- `.github/workflows/ferrumproxy-build.yml` builds and publishes FerrumProxy binaries.
+- `.github/workflows/ferrumproxygui-build.yml` builds and publishes FerrumProxyGUI binaries.
+
+Both workflows are scoped to this repository layout and do not depend on a parent BunProxy directory.
+
 ## Notes
 
-FerrumProxy intentionally keeps the same config shape as BunProxy where possible. Some internal implementation details differ because Rust uses Tokio tasks and Rustls instead of Bun/Node sockets.
+FerrumProxy keeps a familiar YAML config shape while using Tokio tasks and Rustls internally.
 
 If `config.yml` does not exist in the current working directory, FerrumProxy creates a default one automatically. Use `--config <path>` only when you want to load another file.
 
@@ -86,9 +133,9 @@ If `config.yml` does not exist in the current working directory, FerrumProxy cre
 
 # FerrumProxy (日本語)
 
-BunProxy の Rust 実装です。
+FerrumProxy は Minecraft Bedrock と HTTP/HTTPS 転送向けの独立した Rust 製プロキシサーバーです。低遅延の TCP/UDP 転送、HAProxy PROXY protocol、Bedrock pong 書き換え、TLS 待受、Discord 通知、GUI から操作できる REST API を備えています。
 
-FerrumProxy は Bun/TypeScript 実装のそばに置き、外から見た挙動を BunProxy に合わせつつ、ネットワークのホットパスを Rust で処理することを目的にしています。
+`FerrumGUI` には複数の FerrumProxy インスタンスを管理するための Web GUI が含まれています。
 
 ## ビルド
 
@@ -145,7 +192,7 @@ Windows の場合:
 .\target\release\ferrum-proxy.exe
 ```
 
-## BunProxy 互換機能
+## 主な機能
 
 - `endpoint`, `useRestApi`, `savePlayerIP`, `debug`, `listeners` を含む YAML config
 - TCP 転送
@@ -162,8 +209,32 @@ Windows の場合:
 - プレイヤー接続バッファと `playerIP.json` への IP 保存
 - `debug: true` によるデバッグログ
 
+## FerrumProxyGUI
+
+```bash
+cd FerrumGUI
+bun install
+cd frontend && bun install && cd ..
+bun run build:frontend
+bun run generate:embed
+bun run dev
+```
+
+`http://localhost:3000` を開いてください。
+
+FerrumProxyGUI は既定で `gamelist1990/FerrumProxy` の固定タグ `FerrumProxy` から FerrumProxy バイナリを取得します。別のリポジトリを使う場合は `FERRUMPROXY_GITHUB_REPO=owner/repo` を指定してください。
+
+## GitHub Actions
+
+このリポジトリには独立した workflow が 2 つあります。
+
+- `.github/workflows/ferrumproxy-build.yml`: FerrumProxy 本体をビルドして固定タグ `FerrumProxy` に公開
+- `.github/workflows/ferrumproxygui-build.yml`: FerrumProxyGUI をビルドして固定タグ `FerrumProxyGUI` に公開
+
+どちらも BunProxy の親ディレクトリに依存しない構成です。
+
 ## 補足
 
-設定形式は可能な範囲で BunProxy と同じです。内部実装は Bun/Node socket ではなく Tokio task と Rustls を使うため、細部は Rust 向けに調整しています。
+設定形式は YAML です。内部実装は Tokio task と Rustls を使うため、細部は Rust 向けに調整しています。
 
 カレントディレクトリに `config.yml` が無い場合、FerrumProxy は既定の設定ファイルを自動生成します。別の設定ファイルを使いたい場合だけ `--config <path>` を指定してください。

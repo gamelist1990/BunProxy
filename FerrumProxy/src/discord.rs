@@ -175,7 +175,7 @@ fn field(name: &str, value: &str, inline: bool) -> DiscordField {
 
 fn footer() -> DiscordFooter {
     DiscordFooter {
-        text: "BunProxy".to_string(),
+        text: "FerrumProxy".to_string(),
     }
 }
 

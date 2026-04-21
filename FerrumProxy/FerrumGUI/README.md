@@ -21,8 +21,8 @@
 ## インストール
 
 ```bash
-# BunProxy リポジトリ内の FerrumProxyGUI へ移動
-cd FerrumProxyGUI
+# FerrumProxy リポジトリ内の FerrumGUI へ移動
+cd FerrumGUI
 
 # 依存関係をインストール
 bun install
@@ -156,7 +156,7 @@ Linux/macOSでは、設定内の `endpoint` / Listener の `tcp` / `udp` が `1-
 
 無料アカウントでは1時間あたり60リクエストの制限があります。レート制限に達した場合、固定タグ `FerrumProxy` の最新ビルドを既定として扱います。
 
-FerrumProxy のリリース取得先は既定で `gamelist1990/BunProxy` の `FerrumProxy` タグです。別リポジトリやタグから取得したい場合は `FERRUMPROXY_GITHUB_REPO=owner/repo` / `FERRUMPROXY_RELEASE_TAG=FerrumProxy` を指定してください。
+FerrumProxy のリリース取得先は既定で `gamelist1990/FerrumProxy` の `FerrumProxy` タグです。別リポジトリやタグから取得したい場合は `FERRUMPROXY_GITHUB_REPO=owner/repo` / `FERRUMPROXY_RELEASE_TAG=FerrumProxy` を指定してください。
 
 ### WebSocket接続エラー
 
@@ -173,7 +173,6 @@ MIT License
 ---
 
 **関連リンク**
-- [FerrumProxy本体](https://github.com/gamelist1990/BunProxy/tree/main/FerrumProxy)
-- [BunProxy/FerrumProxyリリース](https://github.com/gamelist1990/BunProxy/releases)
-
+- [FerrumProxy本体](https://github.com/gamelist1990/FerrumProxy)
+- [FerrumProxyリリース](https://github.com/gamelist1990/FerrumProxy/releases)
 

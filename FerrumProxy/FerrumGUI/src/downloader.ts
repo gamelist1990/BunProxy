@@ -3,7 +3,7 @@ import path from 'path';
 import { createWriteStream } from 'fs';
 import chalk from 'chalk';
 
-const GITHUB_REPO = process.env.FERRUMPROXY_GITHUB_REPO || 'gamelist1990/BunProxy';
+const GITHUB_REPO = process.env.FERRUMPROXY_GITHUB_REPO || 'gamelist1990/FerrumProxy';
 const RELEASE_API_BASE = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
 const FERRUMPROXY_RELEASE_TAG = process.env.FERRUMPROXY_RELEASE_TAG || 'FerrumProxy';
 const DEFAULT_VERSION = 'latest';

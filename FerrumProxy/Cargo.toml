@@ -2,7 +2,7 @@
 name = "ferrum-proxy"
 version = "0.1.0"
 edition = "2021"
-description = "Rust implementation of BunProxy focused on low-latency TCP/UDP forwarding."
+description = "Low-latency Rust proxy for Minecraft Bedrock and HTTP/HTTPS forwarding."
 
 [dependencies]
 anyhow = "1.0"
